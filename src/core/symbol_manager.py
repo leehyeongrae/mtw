@@ -5,6 +5,8 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import requests
 import time
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 from src.utils.logger import get_logger
 from src.utils.config import config
 
@@ -21,7 +23,32 @@ class SymbolManager:
         # Binance API 설정
         self.base_url = "https://testnet.binancefuture.com" if config.binance_testnet else "https://fapi.binance.com"
         self.session = self._init_exchange()
+        self.client = self._init_client()
         
+    def _init_client(self) -> Client:
+        """Initialize Binance client like BinanceREST"""
+        try:
+            self.logger.info("Initializing Binance client...")
+            
+            if config.binance_testnet:
+                client = Client(
+                    config.binance_api_key,
+                    config.binance_api_secret,
+                    testnet=True
+                )
+            else:
+                client = Client(
+                    config.binance_api_key,
+                    config.binance_api_secret
+                )
+            
+            self.logger.info("Binance client initialized successfully")
+            return client
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Binance client: {e}")
+            raise Exception(f"Binance client initialization failed: {e}")
+    
     def _init_exchange(self) -> requests.Session:
         """Initialize requests session for Binance API calls"""
         try:

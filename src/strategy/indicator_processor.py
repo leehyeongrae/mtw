@@ -32,13 +32,18 @@ class IndicatorProcessor:
         self.min_data_for_hurst = 100  # 150에서 100으로 완화
         self.min_data_for_indicators = 50
         
-    def _should_calculate_hurst(self, current_candle: Optional[Dict], df_length: int) -> bool:
+    def _should_calculate_hurst(self, current_candle: Optional[Dict], df_length: int, force_initial: bool = False) -> bool:
         """Hurst 계산 여부 결정 - 개선된 로직"""
         try:
             # 최소 데이터 확인
             if df_length < self.min_data_for_hurst:
                 self.logger.debug(f"Insufficient data for Hurst: {df_length}/{self.min_data_for_hurst}")
                 return False
+            
+            # 초기 계산 강제 실행 (프로그램 시작 시)
+            if force_initial and self.cached_hurst is None:
+                self.logger.info("Forcing initial Hurst calculation with historical data")
+                return True
             
             # 현재 캔들이 완료된 경우에만 계산
             if current_candle and current_candle.get('x', False):
@@ -50,7 +55,7 @@ class IndicatorProcessor:
                     self.candles_since_hurst += 1
                     
                     # 주기적 강제 재계산 또는 첫 계산
-                    if (self.cached_hurst is None or 
+                    if (self.cached_hurst is None or
                         self.candles_since_hurst >= self.hurst_calculation_interval):
                         self.candles_since_hurst = 0
                         return True
@@ -72,13 +77,14 @@ class IndicatorProcessor:
             'hurst_smoothed': fallback_smoothed
         }
     
-    def calculate_indicators(self, df: pd.DataFrame, current_candle: Optional[Dict] = None) -> Dict:
+    def calculate_indicators(self, df: pd.DataFrame, current_candle: Optional[Dict] = None, force_initial_hurst: bool = False) -> Dict:
         """
         Calculate all indicators - Hurst 계산 최적화
         
         Args:
             df: Historical candles DataFrame
             current_candle: Current candle dict
+            force_initial_hurst: Force initial Hurst calculation
             
         Returns:
             Dict of calculated indicators
@@ -107,7 +113,7 @@ class IndicatorProcessor:
                 return {}
             
             # Hurst 계산 여부 결정
-            calculate_hurst = self._should_calculate_hurst(current_candle, df_length)
+            calculate_hurst = self._should_calculate_hurst(current_candle, df_length, force_initial_hurst)
             
             self.logger.debug(f"Calculating indicators - DataFrame length: {df_length}, Calculate Hurst: {calculate_hurst}")
             
@@ -255,6 +261,7 @@ class IndicatorProcessor:
     def process(self):
         """Main processing loop for this symbol"""
         self.logger.info(f"Starting indicator processor for {self.symbol}")
+        first_calculation = True  # 첫 계산 플래그
         
         while self.data_manager.is_running():
             try:
@@ -262,8 +269,13 @@ class IndicatorProcessor:
                 historical_df, current_candle = self.data_manager.get_candles(self.symbol)
                 
                 if historical_df is not None and len(historical_df) >= self.min_data_for_indicators:
-                    # 지표 계산
-                    indicators = self.calculate_indicators(historical_df, current_candle)
+                    # 지표 계산 - 첫 번째 계산 시 Hurst 강제 계산
+                    force_hurst = first_calculation and len(historical_df) >= self.min_data_for_hurst
+                    indicators = self.calculate_indicators(historical_df, current_candle, force_initial_hurst=force_hurst)
+                    
+                    if force_hurst:
+                        self.logger.info(f"Initial Hurst calculation attempted for {self.symbol}")
+                    first_calculation = False  # 첫 계산 완료
                     
                     if indicators:
                         # 데이터 매니저에 업데이트
