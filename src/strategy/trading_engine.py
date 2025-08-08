@@ -228,7 +228,7 @@ class TradingEngine:
             self.logger.error(f"Error syncing positions: {e}")
     
     async def run(self):
-        """Main trading loop"""
+        """Main trading loop - 간소화"""
         self.logger.info("Starting trading engine")
         
         # Initial position sync
@@ -236,12 +236,14 @@ class TradingEngine:
         
         while self.data_manager.is_running():
             try:
-                # Process signal queue
-                signal_data = self.data_manager.get_signal_from_queue(timeout=0.1)
+                # 큐 방식 제거하고 주기적으로 모든 심볼의 신호 체크
+                symbols = self.data_manager.get_symbol_list()
                 
-                if signal_data:
-                    symbol, signal = signal_data
-                    await self.process_signal(symbol, signal)
+                for symbol in symbols:
+                    # 각 심볼의 최신 신호 확인
+                    signal = self.data_manager.get_signal(symbol)
+                    if signal:
+                        await self.process_signal(symbol, signal)
                 
                 # Check risk stops periodically
                 await self.check_risk_stops()
@@ -250,7 +252,7 @@ class TradingEngine:
                 if int(asyncio.get_event_loop().time()) % 30 == 0:
                     await self.update_positions_from_exchange()
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)  # 1초마다 체크
                 
             except Exception as e:
                 self.logger.error(f"Error in trading loop: {e}")

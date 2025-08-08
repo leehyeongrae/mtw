@@ -180,24 +180,17 @@ class BinanceREST:
                 self.logger.debug(f"Updated {symbol} with completed candle")
     
     async def run(self):
-        """Main REST API loop"""
+        """Main REST API loop - 간소화"""
         self.logger.info("Starting REST API client")
         
         # Initial load of all symbols
         await self.update_all_symbols()
         
-        # Process REST queue for completed candles
+        # 큐 방식 제거하고 단순 주기적 업데이트로 변경
         while self.data_manager.is_running():
             try:
-                # Check for completed candle notifications
-                data = self.data_manager.get_rest_data(timeout=1.0)
-                
-                if data and data.get('type') == 'candle_closed':
-                    symbol = data.get('symbol')
-                    if symbol:
-                        await self.handle_completed_candle(symbol)
-                
-                await asyncio.sleep(0.1)
+                # 주기적으로 모든 심볼 업데이트 (큐 대신)
+                await asyncio.sleep(10)  # 10초마다 업데이트
                 
             except Exception as e:
                 self.logger.error(f"Error in REST API loop: {e}")

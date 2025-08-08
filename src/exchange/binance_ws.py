@@ -112,25 +112,13 @@ class BinanceWebSocket:
             current_candle = candle_manager.format_ws_candle(stream_data)
             
             if current_candle:
-                # 데이터 매니저 업데이트
+                # 데이터 매니저 업데이트 (큐 호출 제거)
                 self.data_manager.update_candles(symbol, current_candle=current_candle)
                 
                 # 캔들 완료 확인
                 if current_candle.get('x', False):
                     self.logger.info(f"Candle closed for {symbol} at {current_candle.get('T')}")
-                    # REST API에 완료된 캔들 처리 요청
-                    self.data_manager.add_rest_data({
-                        'type': 'candle_closed',
-                        'symbol': symbol,
-                        'time': current_candle['T']
-                    })
-                
-                # WebSocket 큐에 추가 (지표 처리용)
-                self.data_manager.add_ws_data({
-                    'symbol': symbol,
-                    'candle': current_candle,
-                    'timestamp': current_candle.get('T', 0)
-                })
+                    # add_rest_data, add_ws_data 호출 제거 (SharedMemory로 이미 처리됨)
             
         except json.JSONDecodeError as e:
             self.logger.error(f"JSON decode error: {e}, message: {message[:100]}...")

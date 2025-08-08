@@ -431,7 +431,7 @@ class DataManager:
                 'has_indicators': indicators is not None,
                 'has_signal': signal is not None,
                 'has_position': position is not None,
-                'last_update': self.last_update.get(symbol, 0)
+                'last_update': self._last_update.get(symbol, 0)
             }
             
             # 데이터 세부 정보
@@ -466,7 +466,7 @@ class DataManager:
                 status['position_pnl'] = position.get('pnl_percent', 0)
             
             # 건강 상태 정보 추가
-            health = self.health_status.get(symbol, {})
+            health = self._health_status.get(symbol, {})
             status['health'] = {
                 'status': health.get('status', 'unknown'),
                 'last_candle_update': health.get('last_candle_update', 0),
@@ -723,3 +723,24 @@ class DataManager:
             
         except Exception as e:
             self.logger.error(f"Error during emergency reset: {e}")
+    
+    # 호환성을 위한 큐 인터페이스 메소드들 (기존 코드와의 호환성 유지)
+    def add_ws_data(self, data: Dict) -> None:
+        """WebSocket 데이터 직접 처리 (큐 대신)"""
+        # SharedMemory로 이미 처리되므로 실제로는 아무것도 하지 않음
+        pass
+    
+    def add_rest_data(self, data: Dict) -> None:
+        """REST 데이터 직접 처리 (큐 대신)"""
+        # SharedMemory로 이미 처리되므로 실제로는 아무것도 하지 않음
+        pass
+    
+    def get_rest_data(self, timeout: float = 1.0) -> Optional[Dict]:
+        """REST 큐 대신 None 반환"""
+        # 큐 방식을 제거했으므로 항상 None 반환
+        return None
+    
+    def get_signal_from_queue(self, timeout: float = 0.1) -> Optional[tuple]:
+        """신호 큐 대신 None 반환"""
+        # 큐 방식을 제거했으므로 항상 None 반환
+        return None

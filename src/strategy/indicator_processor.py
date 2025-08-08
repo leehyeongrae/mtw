@@ -291,18 +291,16 @@ class IndicatorProcessor:
         self.logger.info(f"Indicator processor stopped for {self.symbol}")
 
 
-def run_indicator_processor(symbol: str, shared_memory_manager):
+def run_indicator_processor(symbol: str):
     """
-    Worker function for multiprocessing - 메모리 맵 기반으로 개선
+    Worker function for multiprocessing - pickle 문제 해결
     
     Args:
         symbol: Trading symbol
-        shared_memory_manager: SharedMemoryManager instance
     """
-    # Create a DataManager instance for this process
+    # Create a DataManager instance for this process (각 프로세스에서 독립 생성)
     from src.core.data_manager import DataManager
-    data_manager = DataManager()
-    data_manager.shared_memory = shared_memory_manager
+    data_manager = DataManager()  # 각 프로세스에서 독립적으로 생성
     
     processor = IndicatorProcessor(symbol, data_manager)
     processor.process()
@@ -323,7 +321,7 @@ class IndicatorProcessorManager:
             try:
                 process = mp.Process(
                     target=run_indicator_processor,
-                    args=(symbol, self.data_manager.shared_memory),
+                    args=(symbol,),  # shared_memory_manager 매개변수 제거
                     name=f"indicator_{symbol}"
                 )
                 process.start()
