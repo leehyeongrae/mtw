@@ -13,10 +13,12 @@ class SymbolManager:
     
     def __init__(self):
         self.logger = get_logger("symbol_manager")
-        self.exchange = self._init_exchange()
-        self.min_volume_usdt = 5000000  # 최소 500만 USDT 거래량
+
+        self.min_volume_usdt = 1000000  # 최소 100만 USDT 거래량
         self.quote_currency = 'USDT'
         self.max_symbols = config.symbol_count
+
+        self.exchange = self._init_exchange()        
         
     def _init_exchange(self) -> ccxt.Exchange:
         """Initialize CCXT exchange instance with proper futures configuration"""
