@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: binance-trading-bot
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    environment:
+      - TZ=UTC
+    networks:
+      - trading-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  trading-network:
+    driver: bridge
