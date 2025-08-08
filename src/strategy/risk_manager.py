@@ -86,8 +86,6 @@ class RiskManager:
             if signal['action'] in ['long_entry', 'short_entry']:
                 # Check trend strength
                 adx = indicators.get('adx', 0)
-                if adx < config.adx_trend_threshold:
-                    return False, f"Weak trend (ADX: {adx:.1f})"
         
         elif signal.get('market_type') == 'ranging':
             # For ranging market, ensure strong oscillator signals

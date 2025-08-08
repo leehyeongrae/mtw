@@ -61,8 +61,6 @@ class Config:
     
     # Trend Detection
     trend_detection_candles: int = int(os.getenv('TREND_DETECTION_CANDLES', 8))
-    adx_trend_threshold: float = float(os.getenv('ADX_TREND_THRESHOLD', 25.0))
-    hurst_trend_threshold: float = float(os.getenv('HURST_TREND_THRESHOLD', 0.55))
     
     # Risk Management
     take_profit_percent: float = float(os.getenv('TAKE_PROFIT_PERCENT', 5.0))
