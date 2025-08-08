@@ -3,7 +3,7 @@ Symbol list management based on volume and listing age - 개선된 버전
 """
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
-import ccxt
+import requests
 import time
 from src.utils.logger import get_logger
 from src.utils.config import config
@@ -18,112 +18,114 @@ class SymbolManager:
         self.quote_currency = 'USDT'
         self.max_symbols = config.symbol_count
 
-        self.exchange = self._init_exchange()        
+        # Binance API 설정
+        self.base_url = "https://testnet.binancefuture.com" if config.binance_testnet else "https://fapi.binance.com"
+        self.session = self._init_exchange()
         
-    def _init_exchange(self) -> ccxt.Exchange:
-        """Initialize CCXT exchange instance with proper futures configuration"""
+    def _init_exchange(self) -> requests.Session:
+        """Initialize requests session for Binance API calls"""
         try:
-            self.logger.info("Initializing CCXT Binance exchange...")
+            self.logger.info("Initializing Binance API connection...")
             
-            # 기본 설정
-            exchange_config = {
-                'apiKey': config.binance_api_key,
-                'secret': config.binance_api_secret,
-                'enableRateLimit': True,
-                'timeout': 30000,
-            }
-            
-            # testnet 설정
-            if config.binance_testnet:
-                exchange_config['sandbox'] = True
-                self.logger.info("Using Binance testnet")
-            
-            # Exchange 인스턴스 생성
-            exchange = ccxt.binance(exchange_config)
-            
-            # futures 시장으로 설정 (안전한 방식)
-            if not hasattr(exchange, 'options'):
-                exchange.options = {}
-            
-            # 여러 방식으로 futures 설정 시도
-            exchange.options['defaultType'] = 'swap'  # 최신 방식
-            
-            self.logger.info(f"Exchange initialized with options: {exchange.options}")
+            # requests 세션 생성
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (compatible; MTW-Bot/1.0)',
+                'Content-Type': 'application/json'
+            })
             
             # 연결 테스트
-            self._test_connection(exchange)
+            self._test_connection(session)
             
-            return exchange
+            return session
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize exchange: {e}")
-            raise Exception(f"Exchange initialization failed: {e}")
+            self.logger.error(f"Failed to initialize API session: {e}")
+            raise Exception(f"API session initialization failed: {e}")
     
-    def _test_connection(self, exchange: ccxt.Exchange):
-        """Test exchange connection and configuration"""
+    def _test_connection(self, session: requests.Session):
+        """Test API connection"""
         try:
-            self.logger.info("Testing exchange connection...")
+            self.logger.info("Testing Binance API connection...")
             
-            # 시장 정보 로딩 테스트
-            markets = exchange.load_markets()
-            self.logger.info(f"Successfully loaded {len(markets)} markets")
+            # 서버 시간 확인
+            url = f"{self.base_url}/fapi/v1/time"
+            response = session.get(url, timeout=10)
+            response.raise_for_status()
             
-            # futures 시장 필터링 테스트
-            futures_markets = self._filter_futures_markets(markets)
+            server_time = response.json()
+            self.logger.info(f"Successfully connected to Binance API - Server time: {server_time['serverTime']}")
+            
+            # 거래소 정보 확인
+            futures_markets = self._filter_futures_markets()
             self.logger.info(f"Found {len(futures_markets)} futures markets")
             
             if len(futures_markets) < 10:
-                self.logger.warning("Very few futures markets found - configuration may be incorrect")
+                self.logger.warning("Very few futures markets found - API may have issues")
             
             # 샘플 futures 시장 로깅
             sample_futures = list(futures_markets.items())[:3]
             for symbol, market in sample_futures:
-                self.logger.info(f"Sample futures market: {symbol} - Type: {market.get('type')}")
+                self.logger.info(f"Sample futures market: {symbol} - Status: {market.get('status')}")
             
         except Exception as e:
             self.logger.error(f"Connection test failed: {e}")
             raise
     
-    def _filter_futures_markets(self, markets: Dict) -> Dict:
-        """Filter futures markets from all markets"""
-        futures_markets = {}
-        
-        for symbol, market in markets.items():
-            # 여러 조건으로 futures 마켓 확인
-            market_type = market.get('type', '').lower()
+    def _filter_futures_markets(self) -> Dict:
+        """Filter futures markets using /fapi/v1/exchangeInfo"""
+        try:
+            url = f"{self.base_url}/fapi/v1/exchangeInfo"
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
             
-            # futures 타입 확인 (여러 가능한 값)
-            if market_type in ['future', 'swap', 'futures', 'derivative']:
+            exchange_info = response.json()
+            futures_markets = {}
+            
+            for symbol_info in exchange_info.get('symbols', []):
+                symbol = symbol_info.get('symbol', '')
+                
                 # USDT 페어만 선택
-                if symbol.endswith(f'/{self.quote_currency}'):
+                if symbol.endswith(self.quote_currency):
                     # 활성 상태 확인
-                    if market.get('active', False):
-                        futures_markets[symbol] = market
-        
-        return futures_markets
+                    if (symbol_info.get('status') == 'TRADING' and
+                        symbol_info.get('contractType') in ['PERPETUAL']):
+                        futures_markets[symbol] = {
+                            'symbol': symbol,
+                            'status': symbol_info.get('status'),
+                            'contractType': symbol_info.get('contractType'),
+                            'baseAsset': symbol_info.get('baseAsset'),
+                            'quoteAsset': symbol_info.get('quoteAsset')
+                        }
+            
+            return futures_markets
+            
+        except Exception as e:
+            self.logger.error(f"Error filtering futures markets: {e}")
+            return {}
     
-    def _validate_symbol_data(self, symbol: str, ticker: Dict) -> bool:
-        """Validate symbol data quality"""
+    def _validate_ticker_data(self, symbol: str, ticker: Dict) -> bool:
+        """Validate ticker data quality"""
         try:
             # 기본 데이터 존재 확인
             if not ticker:
                 return False
             
             # 거래량 확인 (quoteVolume = USDT 거래량)
-            quote_volume = ticker.get('quoteVolume', 0)
+            quote_volume = float(ticker.get('quoteVolume', 0))
             if not quote_volume or quote_volume < self.min_volume_usdt:
                 self.logger.debug(f"Low volume for {symbol}: {quote_volume}")
                 return False
             
             # 가격 데이터 확인
-            last_price = ticker.get('last', 0)
+            last_price = float(ticker.get('lastPrice', 0))
             if not last_price or last_price <= 0:
                 self.logger.debug(f"Invalid price for {symbol}: {last_price}")
                 return False
             
             # 24시간 변화율 확인 (극단적인 값 제외)
-            percentage = ticker.get('percentage', 0)
-            if abs(percentage or 0) > 50:  # 50% 이상 변동 제외
+            percentage = float(ticker.get('priceChangePercent', 0))
+            if abs(percentage) > 50:  # 50% 이상 변동 제외
                 self.logger.debug(f"Extreme price change for {symbol}: {percentage}%")
                 return False
             
@@ -145,7 +147,7 @@ class SymbolManager:
     
     def get_top_symbols(self) -> List[str]:
         """
-        Get top symbols by 24h volume with enhanced validation
+        Get top symbols by 24h volume using direct Binance API calls
         
         Returns:
             List of symbol strings
@@ -153,26 +155,25 @@ class SymbolManager:
         try:
             self.logger.info("=== Starting symbol selection process ===")
             
-            # 1. 시장 정보 로딩
-            self.logger.info("Loading markets...")
-            markets = self.exchange.load_markets()
-            self.logger.info(f"Loaded {len(markets)} total markets")
-            
-            # 2. Futures 시장만 필터링
-            futures_markets = self._filter_futures_markets(markets)
-            self.logger.info(f"Filtered to {len(futures_markets)} futures markets")
+            # 1. Futures 시장 정보 가져오기
+            self.logger.info("Loading futures markets...")
+            futures_markets = self._filter_futures_markets()
+            self.logger.info(f"Found {len(futures_markets)} futures markets")
             
             if len(futures_markets) < 5:
                 raise Exception(f"Too few futures markets found: {len(futures_markets)}")
             
-            # 3. 티커 데이터 가져오기
-            self.logger.info("Fetching tickers...")
+            # 2. 24시간 티커 데이터 가져오기
+            self.logger.info("Fetching 24hr ticker data...")
             
             # 재시도 로직 추가
-            tickers = None
+            tickers_data = None
             for attempt in range(3):
                 try:
-                    tickers = self.exchange.fetch_tickers()
+                    url = f"{self.base_url}/fapi/v1/ticker/24hr"
+                    response = self.session.get(url, timeout=10)
+                    response.raise_for_status()
+                    tickers_data = response.json()
                     break
                 except Exception as e:
                     self.logger.warning(f"Ticker fetch attempt {attempt + 1} failed: {e}")
@@ -181,59 +182,56 @@ class SymbolManager:
                     else:
                         raise
             
-            self.logger.info(f"Fetched {len(tickers)} tickers")
+            self.logger.info(f"Fetched ticker data for {len(tickers_data)} symbols")
             
-            # 4. 유효한 심볼 선별
+            # 3. 유효한 심볼 선별
             eligible_symbols = []
             
-            for symbol, market in futures_markets.items():
+            for ticker in tickers_data:
                 try:
-                    # 심볼 형식 변환 (CCXT 형식에서 바이낸스 형식으로)
-                    binance_symbol = symbol.replace('/', '')
+                    symbol = ticker.get('symbol', '')
                     
-                    # 티커 데이터 확인
-                    ticker = tickers.get(symbol)
-                    if not ticker:
-                        # 다른 형식으로 시도
-                        ticker = tickers.get(binance_symbol)
+                    # USDT 페어만 선택
+                    if not symbol.endswith(self.quote_currency):
+                        continue
                     
-                    if not ticker:
-                        self.logger.debug(f"No ticker data for {symbol}")
+                    # futures 시장에 있는지 확인
+                    if symbol not in futures_markets:
                         continue
                     
                     # 데이터 검증
-                    if not self._validate_symbol_data(symbol, ticker):
+                    if not self._validate_ticker_data(symbol, ticker):
                         continue
                     
-                    # 거래량 추출
-                    quote_volume = ticker.get('quoteVolume', 0)
+                    # 거래량 추출 (quoteVolume = USDT 거래량)
+                    quote_volume = float(ticker.get('quoteVolume', 0))
                     
                     eligible_symbols.append({
-                        'symbol': binance_symbol,
+                        'symbol': symbol,
                         'volume': quote_volume,
-                        'price': ticker.get('last', 0),
-                        'change': ticker.get('percentage', 0)
+                        'price': float(ticker.get('lastPrice', 0)),
+                        'change': float(ticker.get('priceChangePercent', 0))
                     })
                     
                 except Exception as e:
-                    self.logger.debug(f"Error processing {symbol}: {e}")
+                    self.logger.debug(f"Error processing ticker for {ticker.get('symbol', 'unknown')}: {e}")
                     continue
             
             self.logger.info(f"Found {len(eligible_symbols)} eligible symbols")
             
-            # 5. 최소 개수 확인
+            # 4. 최소 개수 확인
             if len(eligible_symbols) < self.max_symbols:
                 self.logger.warning(f"Only {len(eligible_symbols)} eligible symbols found, expected {self.max_symbols}")
                 if len(eligible_symbols) == 0:
                     raise Exception("No eligible symbols found")
             
-            # 6. 거래량 기준 정렬
+            # 5. 거래량 기준 정렬
             eligible_symbols.sort(key=lambda x: x['volume'], reverse=True)
             
-            # 7. 상위 심볼 선택
+            # 6. 상위 심볼 선택
             top_symbols = [s['symbol'] for s in eligible_symbols[:self.max_symbols]]
             
-            # 8. 결과 로깅
+            # 7. 결과 로깅
             self.logger.info(f"Selected top {len(top_symbols)} symbols by volume:")
             for i, symbol_data in enumerate(eligible_symbols[:self.max_symbols]):
                 self.logger.info(
@@ -264,7 +262,7 @@ class SymbolManager:
     
     def validate_symbols(self, symbols: List[str]) -> List[str]:
         """
-        Validate symbols are still tradeable
+        Validate symbols are still tradeable using direct API calls
         
         Args:
             symbols: List of symbols to validate
@@ -276,21 +274,25 @@ class SymbolManager:
             self.logger.info(f"Validating {len(symbols)} symbols...")
             
             # 현재 시장 정보 가져오기
-            markets = self.exchange.load_markets()
-            tickers = self.exchange.fetch_tickers()
+            futures_markets = self._filter_futures_markets()
+            
+            # 24시간 티커 데이터 가져오기
+            url = f"{self.base_url}/fapi/v1/ticker/24hr"
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            tickers_data = response.json()
+            
+            # 티커 데이터를 딕셔너리로 변환
+            tickers_dict = {ticker['symbol']: ticker for ticker in tickers_data}
             
             valid_symbols = []
             
             for symbol in symbols:
-                # CCXT 형식으로 변환하여 확인
-                ccxt_symbol = f"{symbol[:-4]}/{symbol[-4:]}"  # BTCUSDT -> BTC/USDT
-                
-                market = markets.get(ccxt_symbol)
-                ticker = tickers.get(ccxt_symbol)
-                
-                if market and ticker and market.get('active', False):
+                if symbol in futures_markets and symbol in tickers_dict:
+                    ticker = tickers_dict[symbol]
+                    
                     # 최소 거래량 확인
-                    volume = ticker.get('quoteVolume', 0)
+                    volume = float(ticker.get('quoteVolume', 0))
                     if volume >= self.min_volume_usdt:
                         valid_symbols.append(symbol)
                     else:

@@ -1,8 +1,7 @@
 """
-Central data management with multiprocessing support - 안정성 강화
+Central data management with shared memory support - mmap 기반으로 개선
 """
 import multiprocessing as mp
-from multiprocessing import Manager, Queue, Process
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
@@ -11,25 +10,19 @@ import time
 import threading
 from src.utils.logger import get_logger
 from src.utils.config import config
+from src.core.shared_memory import SharedMemoryManager
 
 class DataManager:
-    """Central data manager for multiprocessing coordination - 안정성 강화"""
+    """Central data manager for multiprocessing coordination - mmap 기반으로 개선"""
     
     def __init__(self):
         self.logger = get_logger("data_manager")
-        self.manager = Manager()
         
-        # 공유 데이터 구조
-        self.candle_data = self.manager.dict()  # {symbol: {'historical': df, 'current': dict}}
-        self.indicators = self.manager.dict()   # {symbol: dict of indicators}
-        self.signals = self.manager.dict()      # {symbol: signal_dict}
-        self.positions = self.manager.dict()    # {symbol: position_info}
-        self.symbol_list = self.manager.list()  # Active symbols
+        # Shared Memory Manager 초기화
+        self.shared_memory = SharedMemoryManager()
         
-        # 상태 및 제어
+        # 상태 및 제어 (기본 multiprocessing 요소들은 유지)
         self.running = mp.Value('b', True)
-        self.last_update = self.manager.dict()  # {symbol: timestamp}
-        self.health_status = self.manager.dict()  # {symbol: health_info}
         
         # 스레드 안전성을 위한 락
         self.locks = {
@@ -41,20 +34,21 @@ class DataManager:
             'health': mp.Lock()
         }
         
-        # 통신 큐
-        self.ws_queue = Queue(maxsize=1000)  # WebSocket 데이터
-        self.rest_queue = Queue(maxsize=500)  # REST API 데이터
-        self.signal_queue = Queue(maxsize=200)  # 거래 신호
-        
-        # 성능 모니터링
-        self.stats = self.manager.dict({
+        # 성능 모니터링 (로컬 변수로 변경)
+        self.stats = {
             'candle_updates': 0,
             'indicator_updates': 0,
             'signal_updates': 0,
-            'errors': 0
-        })
+            'errors': 0,
+            'start_time': time.time()
+        }
         
-        self.logger.info("DataManager initialized with enhanced stability")
+        # 로컬 캐시 (성능 향상을 위해)
+        self._symbol_list = []
+        self._last_update = {}
+        self._health_status = {}
+        
+        self.logger.info("DataManager initialized with shared memory support")
     
     def _increment_stat(self, stat_name: str):
         """통계 증가"""
@@ -69,10 +63,10 @@ class DataManager:
         self.logger.error(f"Error in {operation}: {error}")
         self._increment_stat('errors')
     
-    def update_candles(self, symbol: str, historical_df: Optional[pd.DataFrame] = None, 
+    def update_candles(self, symbol: str, historical_df: Optional[pd.DataFrame] = None,
                       current_candle: Optional[Dict] = None) -> bool:
         """
-        Update candle data for a symbol - 안전성 강화
+        Update candle data for a symbol using shared memory
         
         Args:
             symbol: Trading symbol
@@ -84,53 +78,18 @@ class DataManager:
         """
         try:
             with self.locks['candle']:
-                # 심볼 데이터 초기화
-                if symbol not in self.candle_data:
-                    self.candle_data[symbol] = self.manager.dict({
-                        'historical': None,
-                        'current': None,
-                        'last_update': time.time()
-                    })
+                # Get candles handler for this symbol
+                candles_handler = self.shared_memory.get_candles_handler(symbol)
                 
-                data = self.candle_data[symbol]
-                updated = False
+                # Write candle data to shared memory
+                success = candles_handler.write_candles(historical_df, current_candle)
                 
-                # Historical 데이터 업데이트
-                if historical_df is not None:
-                    try:
-                        # DataFrame을 dict로 안전하게 변환
-                        df_dict = historical_df.to_dict('records')
-                        data['historical'] = df_dict
-                        data['historical_meta'] = {
-                            'length': len(historical_df),
-                            'timestamp': time.time(),
-                            'columns': list(historical_df.columns)
-                        }
-                        updated = True
-                    except Exception as e:
-                        self.logger.error(f"Error converting DataFrame for {symbol}: {e}")
-                        return False
-                
-                # Current 캔들 업데이트
-                if current_candle is not None:
-                    try:
-                        data['current'] = dict(current_candle)  # 안전한 복사
-                        data['current_timestamp'] = time.time()
-                        updated = True
-                    except Exception as e:
-                        self.logger.error(f"Error updating current candle for {symbol}: {e}")
-                        return False
-                
-                if updated:
-                    data['last_update'] = time.time()
-                    self.candle_data[symbol] = data
-                    self.last_update[symbol] = time.time()
+                if success:
+                    self._last_update[symbol] = time.time()
                     self._increment_stat('candle_updates')
-                    
-                    # 건강 상태 업데이트
                     self._update_health_status(symbol, 'candle_update', True)
                 
-                return updated
+                return success
                 
         except Exception as e:
             self._handle_error(f"update_candles({symbol})", e)
@@ -139,7 +98,7 @@ class DataManager:
     
     def get_candles(self, symbol: str) -> Tuple[Optional[pd.DataFrame], Optional[Dict]]:
         """
-        Get candle data for a symbol - 안전성 강화
+        Get candle data for a symbol from shared memory
         
         Args:
             symbol: Trading symbol
@@ -149,37 +108,13 @@ class DataManager:
         """
         try:
             with self.locks['candle']:
-                if symbol not in self.candle_data:
-                    return None, None
+                # Get candles handler for this symbol
+                candles_handler = self.shared_memory.get_candles_handler(symbol)
                 
-                data = self.candle_data[symbol]
+                # Read candle data from shared memory
+                historical_df, current_candle = candles_handler.read_candles()
                 
-                # Historical 데이터 복원
-                historical = None
-                if data.get('historical') is not None:
-                    try:
-                        df_records = data['historical']
-                        if df_records:
-                            historical = pd.DataFrame(df_records)
-                            # 필요시 데이터 타입 복원
-                            if 'historical_meta' in data:
-                                expected_cols = data['historical_meta'].get('columns', [])
-                                if set(expected_cols) <= set(historical.columns):
-                                    historical = historical[expected_cols]
-                    except Exception as e:
-                        self.logger.error(f"Error restoring DataFrame for {symbol}: {e}")
-                        historical = None
-                
-                # Current 캔들 복원
-                current = None
-                if data.get('current') is not None:
-                    try:
-                        current = dict(data['current'])
-                    except Exception as e:
-                        self.logger.error(f"Error restoring current candle for {symbol}: {e}")
-                        current = None
-                
-                return historical, current
+                return historical_df, current_candle
                 
         except Exception as e:
             self._handle_error(f"get_candles({symbol})", e)
@@ -187,7 +122,7 @@ class DataManager:
     
     def update_indicators(self, symbol: str, indicators: Dict) -> bool:
         """
-        Update indicators for a symbol - 타입 안전성 강화
+        Update indicators for a symbol using shared memory
         
         Args:
             symbol: Trading symbol
@@ -226,11 +161,15 @@ class DataManager:
                         self.logger.warning(f"Error processing indicator {key} for {symbol}: {e}")
                         safe_indicators[key] = 0.0
                 
-                self.indicators[symbol] = safe_indicators
-                self._increment_stat('indicator_updates')
-                self._update_health_status(symbol, 'indicator_update', True)
+                # Get indicators handler and write to shared memory
+                indicators_handler = self.shared_memory.get_indicators_handler(symbol)
+                success = indicators_handler.write_indicators(safe_indicators)
                 
-                return True
+                if success:
+                    self._increment_stat('indicator_updates')
+                    self._update_health_status(symbol, 'indicator_update', True)
+                
+                return success
                 
         except Exception as e:
             self._handle_error(f"update_indicators({symbol})", e)
@@ -239,7 +178,7 @@ class DataManager:
     
     def get_indicators(self, symbol: str) -> Optional[Dict]:
         """
-        Get indicators for a symbol - 안전한 복사본 반환
+        Get indicators for a symbol from shared memory
         
         Args:
             symbol: Trading symbol
@@ -249,18 +188,19 @@ class DataManager:
         """
         try:
             with self.locks['indicator']:
-                indicators = self.indicators.get(symbol)
-                if indicators:
-                    # 안전한 복사본 반환
-                    return dict(indicators)
-                return None
+                # Get indicators handler and read from shared memory
+                indicators_handler = self.shared_memory.get_indicators_handler(symbol)
+                indicators = indicators_handler.read_indicators()
+                
+                return indicators
+                
         except Exception as e:
             self._handle_error(f"get_indicators({symbol})", e)
             return None
     
     def update_signal(self, symbol: str, signal: Dict) -> bool:
         """
-        Update trading signal for a symbol - 큐 오버플로우 방지
+        Update trading signal for a symbol using shared memory
         
         Args:
             symbol: Trading symbol
@@ -271,28 +211,15 @@ class DataManager:
         """
         try:
             with self.locks['signal']:
-                # 신호에 타임스탬프 추가
-                safe_signal = dict(signal)
-                safe_signal['timestamp'] = time.time()
-                safe_signal['symbol'] = symbol
+                # Get signals handler and write to shared memory
+                signals_handler = self.shared_memory.get_signals_handler(symbol)
+                success = signals_handler.write_signal(signal)
                 
-                self.signals[symbol] = safe_signal
+                if success:
+                    self._increment_stat('signal_updates')
+                    self._update_health_status(symbol, 'signal_update', True)
                 
-                # 큐에 추가 (논블로킹)
-                try:
-                    self.signal_queue.put_nowait((symbol, safe_signal))
-                except:
-                    # 큐가 가득 찬 경우 가장 오래된 것 제거 후 추가
-                    try:
-                        self.signal_queue.get_nowait()
-                        self.signal_queue.put_nowait((symbol, safe_signal))
-                    except:
-                        self.logger.warning(f"Signal queue full, dropping signal for {symbol}")
-                
-                self._increment_stat('signal_updates')
-                self._update_health_status(symbol, 'signal_update', True)
-                
-                return True
+                return success
                 
         except Exception as e:
             self._handle_error(f"update_signal({symbol})", e)
@@ -300,20 +227,22 @@ class DataManager:
             return False
     
     def get_signal(self, symbol: str) -> Optional[Dict]:
-        """Get current signal for a symbol"""
+        """Get current signal for a symbol from shared memory"""
         try:
             with self.locks['signal']:
-                signal = self.signals.get(symbol)
-                if signal:
-                    return dict(signal)
-                return None
+                # Get signals handler and read from shared memory
+                signals_handler = self.shared_memory.get_signals_handler(symbol)
+                signal = signals_handler.read_signal()
+                
+                return signal
+                
         except Exception as e:
             self._handle_error(f"get_signal({symbol})", e)
             return None
     
     def update_position(self, symbol: str, position_info: Optional[Dict]) -> bool:
         """
-        Update position information for a symbol
+        Update position information for a symbol using shared memory
         
         Args:
             symbol: Trading symbol
@@ -324,16 +253,26 @@ class DataManager:
         """
         try:
             with self.locks['position']:
+                # Read current positions from shared memory
+                current_positions = self.shared_memory.metadata.read_positions()
+                
                 if position_info is None:
-                    if symbol in self.positions:
-                        del self.positions[symbol]
+                    # Remove position
+                    if symbol in current_positions:
+                        del current_positions[symbol]
                 else:
+                    # Update position
                     safe_position = dict(position_info)
                     safe_position['last_update'] = time.time()
-                    self.positions[symbol] = safe_position
+                    current_positions[symbol] = safe_position
                 
-                self._update_health_status(symbol, 'position_update', True)
-                return True
+                # Write back to shared memory
+                success = self.shared_memory.metadata.write_positions(current_positions)
+                
+                if success:
+                    self._update_health_status(symbol, 'position_update', True)
+                
+                return success
                 
         except Exception as e:
             self._handle_error(f"update_position({symbol})", e)
@@ -341,29 +280,27 @@ class DataManager:
             return False
     
     def get_position(self, symbol: str) -> Optional[Dict]:
-        """Get position information for a symbol"""
+        """Get position information for a symbol from shared memory"""
         try:
             with self.locks['position']:
-                position = self.positions.get(symbol)
-                if position:
-                    return dict(position)
-                return None
+                positions = self.shared_memory.metadata.read_positions()
+                return positions.get(symbol)
         except Exception as e:
             self._handle_error(f"get_position({symbol})", e)
             return None
     
     def get_all_positions(self) -> Dict:
-        """Get all open positions"""
+        """Get all open positions from shared memory"""
         try:
             with self.locks['position']:
-                return {symbol: dict(pos) for symbol, pos in self.positions.items()}
+                return self.shared_memory.metadata.read_positions()
         except Exception as e:
             self._handle_error("get_all_positions", e)
             return {}
     
     def update_symbol_list(self, symbols: List[str]) -> bool:
         """
-        Update the active symbol list
+        Update the active symbol list using shared memory
         
         Args:
             symbols: List of trading symbols
@@ -385,25 +322,30 @@ class DataManager:
                     self.logger.error("No valid symbols in list")
                     return False
                 
-                self.symbol_list[:] = clean_symbols
-                self.logger.info(f"Symbol list updated: {clean_symbols}")
+                # Write to shared memory
+                success = self.shared_memory.metadata.write_symbol_list(clean_symbols)
                 
-                # 새 심볼들의 건강 상태 초기화
-                for symbol in clean_symbols:
-                    if symbol not in self.health_status:
-                        self._init_health_status(symbol)
+                if success:
+                    # Update local cache
+                    self._symbol_list = clean_symbols
+                    self.logger.info(f"Symbol list updated: {clean_symbols}")
+                    
+                    # 새 심볼들의 건강 상태 초기화
+                    for symbol in clean_symbols:
+                        if symbol not in self._health_status:
+                            self._init_health_status(symbol)
                 
-                return True
+                return success
                 
         except Exception as e:
             self._handle_error("update_symbol_list", e)
             return False
     
     def get_symbol_list(self) -> List[str]:
-        """Get the active symbol list"""
+        """Get the active symbol list from shared memory"""
         try:
             with self.locks['symbol']:
-                return list(self.symbol_list)
+                return self.shared_memory.metadata.read_symbol_list()
         except Exception as e:
             self._handle_error("get_symbol_list", e)
             return []
@@ -412,7 +354,7 @@ class DataManager:
         """심볼 건강 상태 초기화"""
         try:
             with self.locks['health']:
-                self.health_status[symbol] = {
+                self._health_status[symbol] = {
                     'last_candle_update': 0,
                     'last_indicator_update': 0,
                     'last_signal_update': 0,
@@ -427,10 +369,10 @@ class DataManager:
         """건강 상태 업데이트"""
         try:
             with self.locks['health']:
-                if symbol not in self.health_status:
+                if symbol not in self._health_status:
                     self._init_health_status(symbol)
                 
-                health = self.health_status[symbol]
+                health = self._health_status[symbol]
                 current_time = time.time()
                 
                 if success:
@@ -448,50 +390,6 @@ class DataManager:
                     health['status'] = 'error'
         except:
             pass
-    
-    def add_ws_data(self, data: Dict) -> None:
-        """Add WebSocket data to queue"""
-        try:
-            self.ws_queue.put_nowait(data)
-        except:
-            # 큐가 가득 찬 경우 오래된 데이터 제거
-            try:
-                self.ws_queue.get_nowait()
-                self.ws_queue.put_nowait(data)
-            except:
-                pass
-    
-    def add_rest_data(self, data: Dict) -> None:
-        """Add REST API data to queue"""
-        try:
-            self.rest_queue.put_nowait(data)
-        except:
-            try:
-                self.rest_queue.get_nowait()
-                self.rest_queue.put_nowait(data)
-            except:
-                pass
-    
-    def get_ws_data(self, timeout: float = 0.1) -> Optional[Dict]:
-        """Get WebSocket data from queue"""
-        try:
-            return self.ws_queue.get(timeout=timeout)
-        except:
-            return None
-    
-    def get_rest_data(self, timeout: float = 0.1) -> Optional[Dict]:
-        """Get REST API data from queue"""
-        try:
-            return self.rest_queue.get(timeout=timeout)
-        except:
-            return None
-    
-    def get_signal_from_queue(self, timeout: float = 0.1) -> Optional[Tuple[str, Dict]]:
-        """Get signal from queue"""
-        try:
-            return self.signal_queue.get(timeout=timeout)
-        except:
-            return None
     
     def is_running(self) -> bool:
         """Check if system is running"""
@@ -784,40 +682,13 @@ class DataManager:
             # 시스템 중지
             self.stop()
             
-            # 큐 정리
-            self._drain_queue(self.ws_queue, "WebSocket")
-            self._drain_queue(self.rest_queue, "REST")
-            self._drain_queue(self.signal_queue, "Signal")
-            
-            # 매니저 종료
-            try:
-                self.manager.shutdown()
-            except Exception as e:
-                self.logger.warning(f"Manager shutdown error: {e}")
+            # Shared memory cleanup
+            self.shared_memory.cleanup_all()
             
             self.logger.info("DataManager cleanup completed")
             
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
-    
-    def _drain_queue(self, queue: Queue, name: str):
-        """큐 비우기"""
-        try:
-            drained = 0
-            while True:
-                try:
-                    queue.get_nowait()
-                    drained += 1
-                except:
-                    break
-            
-            if drained > 0:
-                self.logger.info(f"Drained {drained} items from {name} queue")
-                
-            queue.close()
-            
-        except Exception as e:
-            self.logger.warning(f"Error draining {name} queue: {e}")
     
     def emergency_reset(self):
         """
@@ -830,35 +701,25 @@ class DataManager:
             with self.locks['candle'], self.locks['indicator'], self.locks['signal'], \
                  self.locks['position'], self.locks['health']:
                 
-                # 모든 데이터 구조 초기화
-                self.candle_data.clear()
-                self.indicators.clear()
-                self.signals.clear()
-                self.positions.clear()
-                self.health_status.clear()
-                self.last_update.clear()
+                # Shared memory cleanup and reset
+                self.shared_memory.cleanup_all()
+                self.shared_memory = SharedMemoryManager()
+                
+                # 로컬 데이터 구조 초기화
+                self._symbol_list.clear()
+                self._last_update.clear()
+                self._health_status.clear()
                 
                 # 통계 리셋
-                self.stats.clear()
-                self.stats.update({
+                self.stats = {
                     'candle_updates': 0,
                     'indicator_updates': 0,
                     'signal_updates': 0,
                     'errors': 0,
                     'reset_time': time.time()
-                })
-                
-                # 심볼별 건강 상태 재초기화
-                for symbol in self.symbol_list:
-                    self._init_health_status(symbol)
+                }
             
             self.logger.warning("Emergency reset completed")
             
         except Exception as e:
             self.logger.error(f"Error during emergency reset: {e}")
-            # 최후의 수단: 새 매니저 생성
-            try:
-                self.manager = Manager()
-                self.logger.error("Created new manager instance after reset failure")
-            except Exception as e2:
-                self.logger.critical(f"Failed to create new manager: {e2}")

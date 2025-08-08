@@ -291,14 +291,19 @@ class IndicatorProcessor:
         self.logger.info(f"Indicator processor stopped for {self.symbol}")
 
 
-def run_indicator_processor(symbol: str, data_manager: DataManager):
+def run_indicator_processor(symbol: str, shared_memory_manager):
     """
-    Worker function for multiprocessing
+    Worker function for multiprocessing - 메모리 맵 기반으로 개선
     
     Args:
         symbol: Trading symbol
-        data_manager: Shared data manager
+        shared_memory_manager: SharedMemoryManager instance
     """
+    # Create a DataManager instance for this process
+    from src.core.data_manager import DataManager
+    data_manager = DataManager()
+    data_manager.shared_memory = shared_memory_manager
+    
     processor = IndicatorProcessor(symbol, data_manager)
     processor.process()
 
@@ -318,7 +323,7 @@ class IndicatorProcessorManager:
             try:
                 process = mp.Process(
                     target=run_indicator_processor,
-                    args=(symbol, self.data_manager),
+                    args=(symbol, self.data_manager.shared_memory),
                     name=f"indicator_{symbol}"
                 )
                 process.start()
