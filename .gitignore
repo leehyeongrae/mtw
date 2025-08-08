@@ -1,0 +1,90 @@
+# 환경 변수 및 설정 파일
+.env
+.env.local
+.env.production
+config.local.py
+
+# API 키 및 민감한 데이터
+*.key
+*.pem
+secrets/
+
+# 로그 파일
+logs/
+*.log
+*.log.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 가상환경
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 데이터 파일
+data/
+*.csv
+*.parquet
+*.h5
+*.hdf5
+
+# 백테스팅 결과
+backtest_results/
+*.pkl
+*.pickle
+
+# Docker
+.dockerignore
+
+# 테스트
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 임시 파일
+tmp/
+temp/
+.tmp
