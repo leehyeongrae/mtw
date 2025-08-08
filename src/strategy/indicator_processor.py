@@ -9,7 +9,7 @@ from src.utils.logger import get_logger
 from src.utils.config import config
 from src.core.data_manager import DataManager
 from src.indicators.indicators import Indicators
-from src.indicators.signals import SignalGenerator, detect_trending_market
+from src.indicators.signals import SignalGenerator, is_trending_market_by_slope
 from typing import Dict, Optional, List 
 
 class IndicatorProcessor:
@@ -99,7 +99,7 @@ class IndicatorProcessor:
             
             # Add trending market detection
             if len(result.get('adx', [])) > 0 and len(result.get('hurst_smoothed', [])) > 0:
-                result['is_trending'] = detect_trending_market(
+                result['is_trending'] = is_trending_market_by_slope(
                     result['adx'],
                     result['hurst_smoothed'],
                     config.trend_detection_candles

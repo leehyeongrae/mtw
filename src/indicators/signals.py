@@ -8,9 +8,6 @@ from typing import Dict, Optional, Tuple
 from src.utils.config import config
 from src.utils.logger import get_logger
 
-# 🔥 제거: detect_trending_market 함수 제거됨 (DRY 원칙)
-# is_trending_market_by_slope 메소드로 통합됨
-
 class SignalGenerator:
     """거래 신호 생성기"""
     
@@ -252,9 +249,6 @@ class SignalGenerator:
         except Exception as e:
             self.logger.debug(f"추세장 판별 중 오류: {e}")
             return 0
-    
-# 🔥 제거: is_trending_market 메소드 제거됨 (YAGNI 원칙)
-# 사용되지 않는 레거시 메소드이므로 완전히 제거
     
     def get_trend_signal(self, psar_trend: int, supertrend_trend: int,
                         vi_plus: float, vi_minus: float, 

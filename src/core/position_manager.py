@@ -80,8 +80,8 @@ class PositionManager:
         # Remove from active positions
         del self.positions[symbol]
         
-        # Set cooldown
-        self._set_cooldown(symbol, pnl_percent)
+        # Set cooldown - reason을 전달하도록 수정
+        self._set_cooldown(symbol, pnl_percent, reason)  # reason 파라미터 추가
         
         self.logger.info(
             f"Closed {position['side']} position for {symbol} at {exit_price} "
@@ -89,6 +89,39 @@ class PositionManager:
         )
         
         return position
+
+    def _set_cooldown(self, symbol: str, pnl_percent: float, reason: str = ""):
+        """
+        Set cooldown period after closing position
+        
+        Args:
+            symbol: Trading symbol
+            pnl_percent: PnL percentage of closed position
+            reason: Reason for closing (e.g., 'stop_loss', 'take_profit', 'signal_exit')
+        """
+        base_cooldown = config.position_cooldown_seconds
+        
+        # Check if it's a stop loss closure
+        if 'stop_loss' in reason.lower() or 'stop' in reason.lower():
+            # Stop loss로 청산된 경우 multiplier 적용
+            cooldown_seconds = base_cooldown * config.cooldown_multiplier
+            self.logger.info(
+                f"Stop loss cooldown for {symbol}: {cooldown_seconds}s "
+                f"(base: {base_cooldown}s × multiplier: {config.cooldown_multiplier})"
+            )
+        else:
+            # 일반 청산 (TP, 신호 청산 등) - 기본 쿨다운만 적용
+            cooldown_seconds = base_cooldown
+            self.logger.info(
+                f"Normal cooldown for {symbol}: {cooldown_seconds}s "
+                f"(Reason: {reason if reason else 'general'})"
+            )
+        
+        self.cooldowns[symbol] = time.time() + cooldown_seconds
+        self.logger.debug(
+            f"Cooldown set for {symbol} until "
+            f"{datetime.fromtimestamp(self.cooldowns[symbol]).strftime('%H:%M:%S')}"
+        )
     
     def update_position(self, symbol: str, current_price: float, atr: Optional[float] = None) -> Optional[Dict]:
         """
