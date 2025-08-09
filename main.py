@@ -79,7 +79,7 @@ class TradingSystem:
             await self.position_manager.update_positions()
             
             # 웹소켓 콜백 등록 (수정)
-            self.websocket_manager.register_callback('candle_update', self._on_candle_update)
+            #self.websocket_manager.register_callback('candle_update', self._on_candle_update)
             self.websocket_manager.register_callback('candle_closed', self._on_candle_closed)
             self.websocket_manager.register_callback('realtime_update', self._on_realtime_update)  # 추가
             
@@ -254,12 +254,12 @@ class TradingSystem:
             print("📊 과거 4개 캔들 (REST API):")
             for i in range(-4, 0):
                 candle = recent_candles.iloc[i]
-                print(f"  #{i}: O:{candle['open']:.2f} H:{candle['high']:.2f} "
+                print(f"  #{i} time {candle['open_time']}: O:{candle['open']:.2f} H:{candle['high']:.2f} "
                     f"L:{candle['low']:.2f} C:{candle['close']:.2f} V:{candle['volume']:.0f}")
             
             # 현재 캔들 (WebSocket)
             if current:
-                print(f"\n🔴 현재 진행 캔들 (WebSocket):")
+                print(f"\n🔴 현재 진행 캔들 (WebSocket) :{current.get('open_time','')}")
                 print(f"  O:{current.get('open', 0):.2f} H:{current.get('high', 0):.2f} "
                     f"L:{current.get('low', 0):.2f} C:{current.get('close', 0):.2f} "
                     f"V:{current.get('volume', 0):.0f}")
