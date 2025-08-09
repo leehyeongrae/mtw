@@ -1,193 +1,243 @@
 """
-Telegram bot for monitoring and control
+텔레그램 봇 모듈 (KISS 원칙 적용)
 """
 import asyncio
-from typing import Optional
+from typing import Optional, Dict, Any
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, ContextTypes
 from src.utils.logger import get_logger
 from src.utils.config import config
-from src.core.data_manager import DataManager
-from src.exchange.order_executor import OrderExecutor
 
 class TelegramBot:
-    """Telegram bot for trading system control"""
+    """텔레그램 봇 클래스"""
     
-    def __init__(self, data_manager: DataManager):
+    def __init__(self, trading_system=None):
         self.logger = get_logger("telegram_bot")
-        self.data_manager = data_manager
-        self.order_executor = OrderExecutor()
-        self.bot = None
-        self.application = None
+        self.trading_system = trading_system
+        self.bot: Optional[Bot] = None
+        self.app: Optional[Application] = None
         
-        if config.telegram_bot_token and config.telegram_chat_id:
-            self._init_bot()
-    
-    def _init_bot(self):
-        """Initialize Telegram bot"""
+    async def initialize(self) -> None:
+        """봇 초기화"""
+        if not config.telegram_bot_token:
+            self.logger.warning("텔레그램 토큰 없음 - 봇 비활성화")
+            return
+        
         try:
-            self.application = Application.builder().token(config.telegram_bot_token).build()
-            self.bot = self.application.bot
+            # 애플리케이션 생성
+            self.app = Application.builder().token(config.telegram_bot_token).build()
+            self.bot = self.app.bot
             
-            # Add command handlers
-            self.application.add_handler(CommandHandler("stop", self.cmd_stop))
-            self.application.add_handler(CommandHandler("balance", self.cmd_balance))
-            self.application.add_handler(CommandHandler("status", self.cmd_status))
-            self.application.add_handler(CommandHandler("help", self.cmd_help))
+            # 핸들러 등록
+            self.app.add_handler(CommandHandler("start", self.cmd_start))
+            self.app.add_handler(CommandHandler("stop", self.cmd_stop))
+            self.app.add_handler(CommandHandler("balance", self.cmd_balance))
+            self.app.add_handler(CommandHandler("status", self.cmd_status))
+            self.app.add_handler(CommandHandler("help", self.cmd_help))
             
-            self.logger.info("Telegram bot initialized")
+            # 봇 시작
+            await self.app.initialize()
+            await self.app.start()
+            
+            self.logger.info("텔레그램 봇 초기화 완료")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize Telegram bot: {e}")
+            self.logger.error(f"텔레그램 봇 초기화 실패: {e}")
     
-    async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /stop command"""
-        try:
-            await update.message.reply_text("⚠️ Stopping trading system...")
-            self.data_manager.stop()
-            await update.message.reply_text("✅ Trading system stopped")
-        except Exception as e:
-            self.logger.error(f"Error in stop command: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-    
-    async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /balance command"""
-        try:
-            balance = self.order_executor.get_account_balance()
-            positions = self.order_executor.get_all_positions()
-            
-            total_pnl = sum(p.get('pnl', 0) for p in positions.values())
-            
-            message = f"💰 **Account Balance**\n"
-            message += f"├ Available: ${balance:.2f}\n"
-            message += f"├ Positions: {len(positions)}\n"
-            message += f"└ Unrealized PnL: ${total_pnl:.2f}"
-            
-            await update.message.reply_text(message, parse_mode='Markdown')
-            
-        except Exception as e:
-            self.logger.error(f"Error in balance command: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-    
-    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command"""
-        try:
-            symbols = self.data_manager.get_symbol_list()
-            
-            if not symbols:
-                await update.message.reply_text("No symbols being tracked")
-                return
-            
-            message = "📊 **System Status**\n\n"
-            
-            for symbol in symbols[:10]:  # Limit to 10 symbols for readability
-                status = self.data_manager.get_status(symbol)
-                
-                # Get current price
-                _, current = self.data_manager.get_candles(symbol)
-                price = current.get('c', 0) if current else 0
-                
-                # Get indicators
-                indicators = self.data_manager.get_indicators(symbol)
-                
-                message += f"**{symbol}**\n"
-                message += f"├ Price: ${price:.4f}\n"
-                
-                if indicators:
-                    # Market type
-                    is_trending = indicators.get('is_trending', 0)
-                    market_type = "📈 Trending" if is_trending else "📊 Ranging"
-                    message += f"├ Market: {market_type}\n"
-                    
-                    # Key indicators
-                    if len(indicators.get('adx', [])) > 0:
-                        adx = indicators['adx'][-1]
-                        message += f"├ ADX: {adx:.1f}\n"
-                    
-                    if len(indicators.get('rsi', [])) > 0:
-                        rsi = indicators['rsi'][-1]
-                        message += f"├ RSI: {rsi:.1f}\n"
-                    
-                    if len(indicators.get('hurst_smoothed', [])) > 0:
-                        hurst = indicators['hurst_smoothed'][-1]
-                        message += f"├ Hurst: {hurst:.3f}\n"
-                
-                # Position info
-                position = self.data_manager.get_position(symbol)
-                if position:
-                    side = position.get('side', 'unknown')
-                    pnl = position.get('pnl_percent', 0)
-                    emoji = "🟢" if pnl > 0 else "🔴"
-                    message += f"└ Position: {side.upper()} {emoji} {pnl:.2f}%\n"
-                else:
-                    message += f"└ Position: None\n"
-                
-                message += "\n"
-            
-            await update.message.reply_text(message, parse_mode='Markdown')
-            
-        except Exception as e:
-            self.logger.error(f"Error in status command: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-    
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /help command"""
-        help_text = """
-🤖 **Trading Bot Commands**
-
-/stop - Stop the trading system
-/balance - Show account balance
-/status - Show symbol status
-/help - Show this help message
-
-📊 The bot monitors and trades the top symbols by volume.
+    async def send_message(self, text: str, parse_mode: str = 'HTML') -> None:
         """
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-    
-    async def send_notification(self, message: str):
-        """
-        Send notification to Telegram
+        메시지 전송
         
         Args:
-            message: Message to send
+            text: 메시지 텍스트
+            parse_mode: 파싱 모드
         """
-        if self.bot and config.telegram_chat_id:
-            try:
-                await self.bot.send_message(
-                    chat_id=config.telegram_chat_id,
-                    text=message,
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to send Telegram notification: {e}")
+        if not self.bot or not config.telegram_chat_id:
+            return
+        
+        try:
+            await self.bot.send_message(
+                chat_id=config.telegram_chat_id,
+                text=text,
+                parse_mode=parse_mode
+            )
+        except Exception as e:
+            self.logger.error(f"메시지 전송 실패: {e}")
     
-    async def run(self):
-        """Run the Telegram bot"""
-        if self.application:
-            self.logger.info("Starting Telegram bot")
-            
-            # Send startup notification
-            await self.send_notification("🚀 Trading bot started successfully!")
-            
-            # Start polling
-            await self.application.initialize()
-            await self.application.start()
-            await self.application.updater.start_polling()
-            
-            # Keep running
-            while self.data_manager.is_running():
-                await asyncio.sleep(1)
-            
-            # Cleanup
-            await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
-            
-            self.logger.info("Telegram bot stopped")
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """시작 명령어"""
+        await update.message.reply_text(
+            "🤖 트레이딩 봇이 시작되었습니다.\n"
+            "/help - 명령어 목록 보기"
+        )
+    
+    async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """중지 명령어"""
+        if self.trading_system:
+            await update.message.reply_text("⏹ 트레이딩 봇을 중지합니다...")
+            await self.trading_system.stop()
         else:
-            self.logger.warning("Telegram bot not configured")
+            await update.message.reply_text("❌ 트레이딩 시스템이 연결되지 않았습니다.")
     
-    def stop(self):
-        """Stop the Telegram bot"""
-        if self.application:
-            asyncio.create_task(self.send_notification("⚠️ Trading bot shutting down..."))
+    async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """잔고 확인 명령어"""
+        if not self.trading_system:
+            await update.message.reply_text("❌ 트레이딩 시스템이 연결되지 않았습니다.")
+            return
+        
+        try:
+            balance_info = await self.trading_system.get_account_info()
+            
+            if balance_info:
+                text = "💰 <b>계정 정보</b>\n\n"
+                text += f"잔고: ${balance_info.get('balance', 0):.2f}\n"
+                text += f"미실현 PnL: ${balance_info.get('unrealized_pnl', 0):.2f}\n"
+                text += f"마진 사용률: {balance_info.get('margin_ratio', 0):.2f}%\n"
+                text += f"포지션 수: {balance_info.get('position_count', 0)}"
+                
+                await update.message.reply_text(text, parse_mode='HTML')
+            else:
+                await update.message.reply_text("❌ 계정 정보를 가져올 수 없습니다.")
+                
+        except Exception as e:
+            self.logger.error(f"잔고 조회 오류: {e}")
+            await update.message.reply_text("❌ 오류가 발생했습니다.")
+    
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """상태 확인 명령어"""
+        if not self.trading_system:
+            await update.message.reply_text("❌ 트레이딩 시스템이 연결되지 않았습니다.")
+            return
+        
+        try:
+            # 심볼 인자 확인
+            args = context.args
+            
+            if not args:
+                # 전체 상태
+                status = await self.trading_system.get_all_status()
+                
+                text = "📊 <b>전체 상태</b>\n\n"
+                for symbol, info in status.items():
+                    text += f"<b>{symbol}</b>\n"
+                    text += f"├ 가격: {info.get('price', 0):.4f}\n"
+                    text += f"├ 시장: {info.get('market_type', 'N/A')}\n"
+                    text += f"├ 포지션: {info.get('position', 'None')}\n"
+                    text += f"└ 신호: {info.get('signal', 'None')}\n\n"
+                
+                if not status:
+                    text = "📊 활성 심볼이 없습니다."
+                
+            else:
+                # 특정 심볼 상태
+                symbol = args[0].upper()
+                info = await self.trading_system.get_symbol_status(symbol)
+                
+                if info:
+                    text = f"📊 <b>{symbol} 상세 정보</b>\n\n"
+                    
+                    # 가격 정보
+                    text += "<b>가격 정보</b>\n"
+                    text += f"├ 현재가: {info.get('price', 0):.4f}\n"
+                    text += f"├ 24h 변동: {info.get('change_24h', 0):.2f}%\n"
+                    text += f"└ 거래량: ${info.get('volume', 0):,.0f}\n\n"
+                    
+                    # 시장 상태
+                    text += "<b>시장 분석</b>\n"
+                    text += f"├ 시장 유형: {info.get('market_type', 'N/A')}\n"
+                    text += f"├ ADX: {info.get('adx', 0):.2f}\n"
+                    text += f"├ Hurst: {info.get('hurst', 0):.3f}\n"
+                    text += f"└ 추세: {info.get('trend', 'N/A')}\n\n"
+                    
+                    # 지표
+                    text += "<b>기술 지표</b>\n"
+                    text += f"├ RSI: {info.get('rsi', 0):.1f}\n"
+                    text += f"├ CCI: {info.get('cci', 0):.1f}\n"
+                    text += f"├ MFI: {info.get('mfi', 0):.1f}\n"
+                    text += f"├ VI+: {info.get('vi_plus', 0):.3f}\n"
+                    text += f"├ VI-: {info.get('vi_minus', 0):.3f}\n"
+                    text += f"└ Score: {info.get('oscillator_score', 0):.2f}\n\n"
+                    
+                    # 포지션
+                    if info.get('position'):
+                        text += "<b>포지션 정보</b>\n"
+                        pos = info['position']
+                        text += f"├ 방향: {pos.get('side', 'N/A')}\n"
+                        text += f"├ 진입가: {pos.get('entry_price', 0):.4f}\n"
+                        text += f"├ PnL: ${pos.get('pnl', 0):.2f}\n"
+                        text += f"├ SL: {pos.get('stop_loss', 0):.4f}\n"
+                        text += f"└ TP: {pos.get('take_profit', 0):.4f}\n"
+                else:
+                    text = f"❌ {symbol} 정보를 찾을 수 없습니다."
+            
+            await update.message.reply_text(text, parse_mode='HTML')
+            
+        except Exception as e:
+            self.logger.error(f"상태 조회 오류: {e}")
+            await update.message.reply_text("❌ 오류가 발생했습니다.")
+    
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """도움말 명령어"""
+        help_text = """
+🤖 <b>트레이딩 봇 명령어</b>
+
+/stop - 봇 중지
+/balance - 계정 잔고 확인
+/status - 전체 심볼 상태
+/status [SYMBOL] - 특정 심볼 상세 정보
+/help - 이 도움말 보기
+
+<b>예시:</b>
+/status BTCUSDT
+        """
+        await update.message.reply_text(help_text, parse_mode='HTML')
+    
+    async def notify_trade(self, symbol: str, action: str, details: Dict) -> None:
+        """
+        거래 알림 전송
+        
+        Args:
+            symbol: 심볼명
+            action: 거래 액션
+            details: 거래 상세 정보
+        """
+        emoji = {
+            'long_entry': '🟢',
+            'short_entry': '🔴',
+            'long_exit': '⚪',
+            'short_exit': '⚪',
+            'stop_loss': '🛑',
+            'take_profit': '💰'
+        }.get(action, '📊')
+        
+        text = f"{emoji} <b>{symbol} - {action.upper()}</b>\n\n"
+        
+        if 'entry' in action:
+            text += f"진입가: {details.get('price', 0):.4f}\n"
+            text += f"수량: {details.get('quantity', 0):.4f}\n"
+            text += f"시장: {details.get('market_type', 'N/A')}\n"
+            text += f"이유: {details.get('reason', 'N/A')}"
+        elif 'exit' in action or action in ['stop_loss', 'take_profit']:
+            text += f"청산가: {details.get('price', 0):.4f}\n"
+            text += f"PnL: ${details.get('pnl', 0):.2f}\n"
+            text += f"수익률: {details.get('pnl_percent', 0):.2f}%\n"
+            text += f"이유: {details.get('reason', action)}"
+        
+        await self.send_message(text)
+    
+    async def notify_error(self, error_msg: str) -> None:
+        """
+        에러 알림 전송
+        
+        Args:
+            error_msg: 에러 메시지
+        """
+        text = f"⚠️ <b>시스템 오류</b>\n\n{error_msg}"
+        await self.send_message(text)
+    
+    async def stop(self) -> None:
+        """봇 종료"""
+        if self.app:
+            await self.app.stop()
+            await self.app.shutdown()
+            self.logger.info("텔레그램 봇 종료")

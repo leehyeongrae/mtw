@@ -5,12 +5,11 @@ services:
     build: .
     container_name: binance-trading-bot
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
-      - ./logs:/app/logs
-      - ./data:/app/data
-      - ./.env:/app/.env:ro
-    environment:
-      - TZ=UTC
+      - ./logs:/app/logs  # 로그 디렉토리 마운트 (선택사항)
+      - ./data:/app/data  # 데이터 디렉토리 마운트 (선택사항)
     networks:
       - trading-network
     logging:
@@ -18,7 +17,19 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # 헬스체크 (선택사항)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 networks:
   trading-network:
     driver: bridge
+
+# 볼륨 정의 (선택사항)
+volumes:
+  logs:
+  data:
