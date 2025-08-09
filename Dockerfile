@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
 # 요구사항 파일 복사 및 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get install -y ntpdate
 
 # 소스 코드 복사
 COPY src/ ./src/

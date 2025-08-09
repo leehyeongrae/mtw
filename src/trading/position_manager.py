@@ -1,20 +1,26 @@
 """
-포지션 관리 모듈 (YAGNI 원칙 적용)
+position_manager.py 파일 전체 수정 버전
 """
 import asyncio
 from typing import Dict, Optional, List
 from datetime import datetime, timedelta
-from src.core import symbol_manager
 from src.utils.logger import get_logger
 from src.utils.config import config
 
 class PositionManager:
     """포지션 관리 클래스"""
     
-    def __init__(self, rest_manager):
+    def __init__(self, rest_manager, symbol_manager=None):
+        """
+        포지션 매니저 초기화
+        
+        Args:
+            rest_manager: REST API 매니저
+            symbol_manager: 심볼 매니저 (선택적)
+        """
         self.logger = get_logger("position_manager")
         self.rest_manager = rest_manager
-        self.symbol_manager = symbol_manager  # 추가
+        self.symbol_manager = symbol_manager
         self.positions: Dict[str, Dict] = {}  # 심볼별 포지션
         self.cooldowns: Dict[str, datetime] = {}  # 심볼별 쿨다운
         self.lock = asyncio.Lock()
@@ -136,7 +142,7 @@ class PositionManager:
     
     async def open_position(self, symbol: str, side: str, quantity: float) -> bool:
         """
-        포지션 오픈 - 수정 버전 (마진 모드 설정 추가)
+        포지션 오픈
         
         Args:
             symbol: 심볼명
@@ -224,7 +230,7 @@ class PositionManager:
     
     def calculate_position_size(self, symbol: str, account_balance: float, current_price: float) -> float:
         """
-        포지션 크기 계산 - 수정 버전 (설정 가능한 비율)
+        포지션 크기 계산
         
         Args:
             symbol: 심볼명
@@ -236,8 +242,7 @@ class PositionManager:
         """
         try:
             # 심볼 정보 가져오기
-            from src.core.symbol_manager import SymbolManager
-            symbol_info = self.symbol_manager.get_symbol_info(symbol) if hasattr(self, 'symbol_manager') else None
+            symbol_info = self.symbol_manager.get_symbol_info(symbol) if self.symbol_manager else None
             
             # 계정의 설정된 비율 사용 (config에서 가져옴)
             position_ratio = config.position_size_ratio
