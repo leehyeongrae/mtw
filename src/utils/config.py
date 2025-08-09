@@ -25,6 +25,7 @@ class Config:
         self.leverage = int(os.getenv('LEVERAGE', '5'))
         self.symbol_count = int(os.getenv('SYMBOL_COUNT', '5'))
         self.take_profit_percent = float(os.getenv('TAKE_PROFIT_PERCENT', '5.0'))
+        self.position_size_ratio = float(os.getenv('POSITION_SIZE_RATIO', '0.1'))  # 추가: 포지션 크기 비율
         
         # Logging
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()

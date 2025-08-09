@@ -28,11 +28,11 @@ class TradingSystem:
         self.logger = get_logger("trading_system")
         self.running = False
         
-        # 매니저 초기화
+        # 매니저 초기화 (순서 중요)
         self.candle_manager = CandleManager()
         self.rest_manager = RestManager()
         self.symbol_manager = SymbolManager(self.rest_manager)
-        self.position_manager = PositionManager(self.rest_manager)
+        self.position_manager = PositionManager(self.rest_manager, self.symbol_manager)  # 수정: symbol_manager 전달
         self.risk_manager = RiskManager(self.position_manager)
         self.websocket_manager = WebSocketManager(self.candle_manager)
         self.telegram_bot = TelegramBot(self)
@@ -442,7 +442,9 @@ class TradingSystem:
             self.logger.error(f"{symbol}: 신호 처리 실패 - {e}")
     
     async def _execute_signal(self, symbol: str, signal: Dict, indicators: Dict) -> None:
-        """신호 실행"""
+        """
+        신호 실행 - 수정 버전 (포지션 크기 계산 개선)
+        """
         try:
             action = signal['action']
             
@@ -455,28 +457,61 @@ class TradingSystem:
                 # 계정 잔고 확인
                 balance_data = await self.rest_manager.get_account_balance()
                 if not balance_data:
+                    self.logger.error(f"{symbol}: 계정 잔고 조회 실패")
                     return
                 
-                balance = sum(float(b['balance']) for b in balance_data)
+                # USDT 잔고 찾기
+                usdt_balance = 0
+                for asset in balance_data:
+                    if asset.get('asset') == 'USDT':
+                        usdt_balance = float(asset.get('balance', 0))
+                        break
                 
-                # 포지션 크기 계산
-                quantity = self.position_manager.calculate_position_size(symbol, balance)
+                if usdt_balance <= 0:
+                    self.logger.error(f"{symbol}: USDT 잔고 부족 (${usdt_balance:.2f})")
+                    return
+                
+                # 현재 가격 가져오기
+                df = await self.candle_manager.get_candles_for_analysis(symbol)
+                if df is None or len(df) == 0:
+                    self.logger.error(f"{symbol}: 현재 가격 조회 실패")
+                    return
+                
+                current_price = float(df.iloc[-1]['close'])
+                
+                # 포지션 크기 계산 (현재 가격 포함)
+                quantity = self.position_manager.calculate_position_size(symbol, usdt_balance, current_price)
                 
                 # 심볼 정보에서 정밀도 적용
                 symbol_info = self.symbol_manager.get_symbol_info(symbol)
                 if symbol_info:
                     precision = symbol_info.get('quantityPrecision', 3)
+                    min_qty = symbol_info.get('minQty', 0.001)
+                    
+                    # 정밀도 적용
                     quantity = round(quantity, precision)
+                    
+                    # 최소 수량 체크
+                    if quantity < min_qty:
+                        self.logger.warning(f"{symbol}: 수량이 최소값보다 작음. 최소값으로 조정: {min_qty}")
+                        quantity = min_qty
                 
                 # 포지션 오픈
                 side = 'long' if 'long' in action else 'short'
+                
+                self.logger.info(
+                    f"{symbol}: {side.upper()} 진입 시도 - "
+                    f"잔고: ${usdt_balance:.2f}, "
+                    f"현재가: ${current_price:.4f}, "
+                    f"수량: {quantity}"
+                )
+                
                 success = await self.position_manager.open_position(symbol, side, quantity)
                 
                 if success:
                     # 리스크 한도 설정
-                    df = await self.candle_manager.get_candles_for_analysis(symbol)
-                    entry_price = float(df.iloc[-1]['close'])
-                    atr = indicators['atr'][-1] if len(indicators['atr']) > 0 else entry_price * 0.01
+                    entry_price = current_price
+                    atr = indicators['atr'][-1] if len(indicators.get('atr', [])) > 0 else entry_price * 0.01
                     
                     self.risk_manager.set_initial_limits(symbol, entry_price, side, atr)
                     
@@ -485,8 +520,11 @@ class TradingSystem:
                         'price': entry_price,
                         'quantity': quantity,
                         'market_type': signal['market_type'],
-                        'reason': signal.get('reason', '')
+                        'reason': signal.get('reason', ''),
+                        'balance': usdt_balance
                     })
+                else:
+                    self.logger.error(f"{symbol}: 포지션 오픈 실패")
             
             # 청산 신호
             elif 'exit' in action:
@@ -499,15 +537,19 @@ class TradingSystem:
                     # 텔레그램 알림
                     position = self.position_manager.get_position(symbol)
                     if position:
+                        pnl_percent = (position['unrealized_pnl'] / position['margin']) * 100 if position['margin'] > 0 else 0
+                        
                         await self.telegram_bot.notify_trade(symbol, action, {
                             'price': position['mark_price'],
                             'pnl': position['unrealized_pnl'],
-                            'pnl_percent': (position['unrealized_pnl'] / position['margin']) * 100,
+                            'pnl_percent': pnl_percent,
                             'reason': signal.get('reason', '')
                         })
                         
         except Exception as e:
             self.logger.error(f"{symbol}: 신호 실행 실패 - {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
     
     async def _handle_risk_action(self, symbol: str, action: str) -> None:
         """리스크 액션 처리"""

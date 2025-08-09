@@ -20,7 +20,8 @@ class CandleManager:
         
     async def initialize_candles(self, symbol: str, candle_data: List[List]) -> bool:
         """
-        캔들 데이터 초기화
+        캔들 데이터 초기화 - 수정 버전
+        마지막 캔들이 현재 진행 중이면 제외
         
         Args:
             symbol: 심볼명
@@ -45,11 +46,25 @@ class CandleManager:
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = df[col].astype(float)
                 
+                # 현재 시간 확인
+                import time
+                current_time = pd.to_datetime(time.time() * 1000, unit='ms')
+                
+                # 마지막 캔들이 현재 진행 중인지 확인
+                if len(df) > 0:
+                    last_candle_close_time = df.iloc[-1]['close_time']
+                    
+                    # 마지막 캔들의 close_time이 현재 시간보다 미래면 진행 중인 캔들
+                    if last_candle_close_time > current_time:
+                        # 진행 중인 마지막 캔들 제외
+                        df = df.iloc[:-1]
+                        self.logger.debug(f"{symbol}: 진행 중인 마지막 캔들 제외")
+                
                 # 최근 N개만 유지
                 df = df.tail(config.candle_limit).reset_index(drop=True)
                 self.candles[symbol] = df
                 
-                self.logger.info(f"{symbol}: 캔들 데이터 초기화 완료 ({len(df)}개)")
+                self.logger.info(f"{symbol}: 캔들 데이터 초기화 완료 ({len(df)}개 완성된 캔들)")
                 return True
                 
         except Exception as e:
@@ -164,9 +179,11 @@ class CandleManager:
             self.logger.error(f"{symbol}: 무결성 검증 오류 - {e}")
             return False
     
+
     async def get_candles_for_analysis(self, symbol: str) -> Optional[pd.DataFrame]:
         """
-        분석용 캔들 데이터 반환
+        분석용 캔들 데이터 반환 - 수정 버전
+        REST 데이터(완성된 캔들) + WebSocket 데이터(현재 진행 캔들) 조합
         
         Args:
             symbol: 심볼명
@@ -178,24 +195,52 @@ class CandleManager:
             if symbol not in self.candles:
                 return None
             
-            # 현재 진행 캔들이 있으면 임시로 추가
+            # REST 데이터 복사 (완성된 캔들들만)
             df = self.candles[symbol].copy()
             
-            if symbol in self.current_candles and not self.current_candles[symbol].get('is_closed', False):
+            # 현재 진행 캔들이 있고 아직 닫히지 않았으면 추가
+            if symbol in self.current_candles:
                 current = self.current_candles[symbol]
                 
-                # 현재 캔들을 임시로 추가
-                temp_row = pd.DataFrame([{
-                    'open_time': pd.to_datetime(current['open_time'], unit='ms'),
-                    'open': current['open'],
-                    'high': current['high'],
-                    'low': current['low'],
-                    'close': current['close'],
-                    'volume': current['volume'],
-                    'close_time': pd.to_datetime(current['close_time'], unit='ms')
-                }])
-                
-                df = pd.concat([df, temp_row], ignore_index=True)
+                # WebSocket 캔들이 아직 진행 중인지 확인
+                if not current.get('is_closed', False):
+                    # 마지막 REST 캔들의 close_time과 현재 WebSocket 캔들의 open_time 비교
+                    if len(df) > 0:
+                        last_rest_close_time = df.iloc[-1]['close_time']
+                        current_open_time = pd.to_datetime(current['open_time'], unit='ms')
+                        
+                        # REST의 마지막 캔들이 이미 완성된 캔들인지 확인
+                        # close_time이 현재 WebSocket 캔들의 open_time보다 이전이면 겹치지 않음
+                        if last_rest_close_time < current_open_time:
+                            # 현재 진행 중인 WebSocket 캔들 추가
+                            temp_row = pd.DataFrame([{
+                                'open_time': current_open_time,
+                                'open': current['open'],
+                                'high': current['high'],
+                                'low': current['low'],
+                                'close': current['close'],
+                                'volume': current['volume'],
+                                'close_time': pd.to_datetime(current['close_time'], unit='ms')
+                            }])
+                            
+                            df = pd.concat([df, temp_row], ignore_index=True)
+                        else:
+                            # REST의 마지막 캔들이 현재 진행 중인 캔들과 같은 시간대
+                            # WebSocket 데이터로 교체
+                            df.iloc[-1] = {
+                                'open_time': current_open_time,
+                                'open': current['open'],
+                                'high': current['high'],
+                                'low': current['low'],
+                                'close': current['close'],
+                                'volume': current['volume'],
+                                'close_time': pd.to_datetime(current['close_time'], unit='ms'),
+                                'quote_volume': df.iloc[-1]['quote_volume'] if 'quote_volume' in df.columns else 0,
+                                'trades': df.iloc[-1]['trades'] if 'trades' in df.columns else 0,
+                                'taker_buy_base': df.iloc[-1]['taker_buy_base'] if 'taker_buy_base' in df.columns else 0,
+                                'taker_buy_quote': df.iloc[-1]['taker_buy_quote'] if 'taker_buy_quote' in df.columns else 0,
+                                'ignore': df.iloc[-1]['ignore'] if 'ignore' in df.columns else 0
+                            }
             
             return df
     

@@ -1,5 +1,5 @@
 """
-텔레그램 봇 모듈 (KISS 원칙 적용)
+telegram/bot.py 수정 - 폴링 모드 및 명령어 작동 문제 해결
 """
 import asyncio
 from typing import Optional, Dict, Any
@@ -16,9 +16,10 @@ class TelegramBot:
         self.trading_system = trading_system
         self.bot: Optional[Bot] = None
         self.app: Optional[Application] = None
+        self.polling_task = None
         
     async def initialize(self) -> None:
-        """봇 초기화"""
+        """봇 초기화 - 폴링 모드로 변경"""
         if not config.telegram_bot_token:
             self.logger.warning("텔레그램 토큰 없음 - 봇 비활성화")
             return
@@ -35,11 +36,17 @@ class TelegramBot:
             self.app.add_handler(CommandHandler("status", self.cmd_status))
             self.app.add_handler(CommandHandler("help", self.cmd_help))
             
-            # 봇 시작
+            # 봇 초기화
             await self.app.initialize()
             await self.app.start()
             
-            self.logger.info("텔레그램 봇 초기화 완료")
+            # 폴링 시작 (백그라운드 태스크로)
+            self.polling_task = asyncio.create_task(self.app.updater.start_polling(drop_pending_updates=True))
+            
+            self.logger.info("텔레그램 봇 초기화 완료 (폴링 모드)")
+            
+            # 초기화 성공 메시지 전송
+            await self.send_message("🤖 트레이딩 봇이 시작되었습니다!\n/help 명령어로 사용법을 확인하세요.")
             
         except Exception as e:
             self.logger.error(f"텔레그램 봇 초기화 실패: {e}")
@@ -67,15 +74,21 @@ class TelegramBot:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """시작 명령어"""
         await update.message.reply_text(
-            "🤖 트레이딩 봇이 시작되었습니다.\n"
+            "🤖 트레이딩 봇이 실행 중입니다.\n"
             "/help - 명령어 목록 보기"
         )
     
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """중지 명령어"""
+        # 관리자 권한 체크 (chat_id 확인)
+        if str(update.effective_chat.id) != str(config.telegram_chat_id):
+            await update.message.reply_text("❌ 권한이 없습니다.")
+            return
+            
         if self.trading_system:
             await update.message.reply_text("⏹ 트레이딩 봇을 중지합니다...")
-            await self.trading_system.stop()
+            # 비동기로 시스템 중지
+            asyncio.create_task(self.trading_system.stop())
         else:
             await update.message.reply_text("❌ 트레이딩 시스템이 연결되지 않았습니다.")
     
@@ -104,7 +117,7 @@ class TelegramBot:
             await update.message.reply_text("❌ 오류가 발생했습니다.")
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """상태 확인 명령어"""
+        """상태 확인 명령어 - 완성 버전"""
         if not self.trading_system:
             await update.message.reply_text("❌ 트레이딩 시스템이 연결되지 않았습니다.")
             return
@@ -114,22 +127,24 @@ class TelegramBot:
             args = context.args
             
             if not args:
-                # 전체 상태
+                # 전체 상태 (간략히)
                 status = await self.trading_system.get_all_status()
+                
+                if not status:
+                    await update.message.reply_text("📊 활성 심볼이 없습니다.")
+                    return
                 
                 text = "📊 <b>전체 상태</b>\n\n"
                 for symbol, info in status.items():
-                    text += f"<b>{symbol}</b>\n"
-                    text += f"├ 가격: {info.get('price', 0):.4f}\n"
-                    text += f"├ 시장: {info.get('market_type', 'N/A')}\n"
-                    text += f"├ 포지션: {info.get('position', 'None')}\n"
-                    text += f"└ 신호: {info.get('signal', 'None')}\n\n"
-                
-                if not status:
-                    text = "📊 활성 심볼이 없습니다."
+                    if info:
+                        text += f"<b>{symbol}</b>\n"
+                        text += f"├ 가격: {info.get('price', 0):.4f}\n"
+                        text += f"├ 시장: {info.get('market_type', 'N/A')}\n"
+                        text += f"├ 포지션: {info.get('position', {}).get('side', 'None') if info.get('position') else 'None'}\n"
+                        text += f"└ 추세: {info.get('trend', 'N/A')}\n\n"
                 
             else:
-                # 특정 심볼 상태
+                # 특정 심볼 상태 (상세)
                 symbol = args[0].upper()
                 info = await self.trading_system.get_symbol_status(symbol)
                 
@@ -139,8 +154,9 @@ class TelegramBot:
                     # 가격 정보
                     text += "<b>가격 정보</b>\n"
                     text += f"├ 현재가: {info.get('price', 0):.4f}\n"
-                    text += f"├ 24h 변동: {info.get('change_24h', 0):.2f}%\n"
-                    text += f"└ 거래량: ${info.get('volume', 0):,.0f}\n\n"
+                    if 'change_24h' in info:
+                        text += f"├ 24h 변동: {info.get('change_24h', 0):.2f}%\n"
+                    text += f"└ 거래량: {info.get('volume', 0):,.0f}\n\n"
                     
                     # 시장 상태
                     text += "<b>시장 분석</b>\n"
@@ -156,17 +172,24 @@ class TelegramBot:
                     text += f"├ MFI: {info.get('mfi', 0):.1f}\n"
                     text += f"├ VI+: {info.get('vi_plus', 0):.3f}\n"
                     text += f"├ VI-: {info.get('vi_minus', 0):.3f}\n"
-                    text += f"└ Score: {info.get('oscillator_score', 0):.2f}\n\n"
+                    if 'oscillator_score' in info:
+                        text += f"└ Score: {info.get('oscillator_score', 0):.2f}\n\n"
+                    else:
+                        text += "\n"
                     
                     # 포지션
                     if info.get('position'):
                         text += "<b>포지션 정보</b>\n"
                         pos = info['position']
-                        text += f"├ 방향: {pos.get('side', 'N/A')}\n"
+                        text += f"├ 방향: {'롱' if pos.get('side') == 'long' else '숏'}\n"
                         text += f"├ 진입가: {pos.get('entry_price', 0):.4f}\n"
                         text += f"├ PnL: ${pos.get('pnl', 0):.2f}\n"
-                        text += f"├ SL: {pos.get('stop_loss', 0):.4f}\n"
-                        text += f"└ TP: {pos.get('take_profit', 0):.4f}\n"
+                        if pos.get('stop_loss'):
+                            text += f"├ SL: {pos.get('stop_loss', 0):.4f}\n"
+                        if pos.get('take_profit'):
+                            text += f"└ TP: {pos.get('take_profit', 0):.4f}\n"
+                    else:
+                        text += "<b>포지션</b>: 없음\n"
                 else:
                     text = f"❌ {symbol} 정보를 찾을 수 없습니다."
             
@@ -236,8 +259,13 @@ class TelegramBot:
         await self.send_message(text)
     
     async def stop(self) -> None:
-        """봇 종료"""
+        """봇 종료 - 수정"""
         if self.app:
+            # 폴링 중지
+            if self.polling_task:
+                await self.app.updater.stop()
+                self.polling_task.cancel()
+            
             await self.app.stop()
             await self.app.shutdown()
             self.logger.info("텔레그램 봇 종료")

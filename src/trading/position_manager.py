@@ -4,6 +4,7 @@
 import asyncio
 from typing import Dict, Optional, List
 from datetime import datetime, timedelta
+from src.core import symbol_manager
 from src.utils.logger import get_logger
 from src.utils.config import config
 
@@ -13,6 +14,7 @@ class PositionManager:
     def __init__(self, rest_manager):
         self.logger = get_logger("position_manager")
         self.rest_manager = rest_manager
+        self.symbol_manager = symbol_manager  # 추가
         self.positions: Dict[str, Dict] = {}  # 심볼별 포지션
         self.cooldowns: Dict[str, datetime] = {}  # 심볼별 쿨다운
         self.lock = asyncio.Lock()
@@ -134,7 +136,7 @@ class PositionManager:
     
     async def open_position(self, symbol: str, side: str, quantity: float) -> bool:
         """
-        포지션 오픈
+        포지션 오픈 - 수정 버전 (마진 모드 설정 추가)
         
         Args:
             symbol: 심볼명
@@ -154,6 +156,12 @@ class PositionManager:
             if await self.is_in_cooldown(symbol):
                 return False
             
+            # 마진 모드 설정 (ISOLATED)
+            margin_mode_result = await self.rest_manager.set_margin_mode(symbol, 'ISOLATED')
+            if margin_mode_result is None:
+                # 이미 설정되어 있을 수 있음 (400 에러이지만 정상)
+                self.logger.debug(f"{symbol}: 마진 모드 이미 ISOLATED로 설정됨")
+            
             # 레버리지 설정
             await self.rest_manager.set_leverage(symbol, config.leverage)
             
@@ -162,9 +170,11 @@ class PositionManager:
             result = await self.rest_manager.place_order(symbol, order_side, quantity)
             
             if result:
-                self.logger.info(f"{symbol}: {side} 포지션 오픈 성공")
+                self.logger.info(f"{symbol}: {side} 포지션 오픈 성공 (수량: {quantity})")
                 await self.set_cooldown(symbol)  # 기본 쿨다운 설정
                 return True
+            else:
+                self.logger.error(f"{symbol}: 포지션 오픈 실패")
             
             return False
             
@@ -212,24 +222,59 @@ class PositionManager:
             self.logger.error(f"{symbol}: 포지션 종료 실패 - {e}")
             return False
     
-    def calculate_position_size(self, symbol: str, account_balance: float) -> float:
+    def calculate_position_size(self, symbol: str, account_balance: float, current_price: float) -> float:
         """
-        포지션 크기 계산 (간단한 고정 비율)
+        포지션 크기 계산 - 수정 버전 (설정 가능한 비율)
         
         Args:
             symbol: 심볼명
             account_balance: 계정 잔고
+            current_price: 현재 가격
             
         Returns:
-            float: 포지션 크기
+            float: 포지션 크기 (계약 수량)
         """
-        # 심볼별 최소 수량 고려
-        from src.core.symbol_manager import SymbolManager
-        
-        # 계정의 일정 비율 사용 (예: 10%)
-        position_value = account_balance * 0.1
-        
-        # 레버리지 고려
-        position_value *= config.leverage
-        
-        return position_value
+        try:
+            # 심볼 정보 가져오기
+            from src.core.symbol_manager import SymbolManager
+            symbol_info = self.symbol_manager.get_symbol_info(symbol) if hasattr(self, 'symbol_manager') else None
+            
+            # 계정의 설정된 비율 사용 (config에서 가져옴)
+            position_ratio = config.position_size_ratio
+            position_value_usdt = account_balance * position_ratio
+            
+            # 레버리지 적용된 포지션 가치
+            leveraged_value = position_value_usdt * config.leverage
+            
+            # 계약 수량 계산 (가치 / 현재가격)
+            quantity = leveraged_value / current_price
+            
+            # 심볼 정밀도 적용
+            if symbol_info:
+                # 최소 수량 확인
+                min_qty = symbol_info.get('minQty', 0.001)
+                quantity_precision = symbol_info.get('quantityPrecision', 3)
+                
+                # 정밀도 적용
+                quantity = round(quantity, quantity_precision)
+                
+                # 최소 수량 체크
+                if quantity < min_qty:
+                    self.logger.warning(f"{symbol}: 계산된 수량({quantity})이 최소 수량({min_qty})보다 작음")
+                    quantity = min_qty
+            
+            self.logger.info(
+                f"{symbol}: 포지션 크기 계산 - "
+                f"잔고: ${account_balance:.2f}, "
+                f"비율: {position_ratio*100:.1f}%, "
+                f"레버리지: {config.leverage}x, "
+                f"현재가: ${current_price:.4f}, "
+                f"수량: {quantity}"
+            )
+            
+            return quantity
+            
+        except Exception as e:
+            self.logger.error(f"{symbol}: 포지션 크기 계산 실패 - {e}")
+            # 에러 시 최소 수량 반환
+            return 0.001

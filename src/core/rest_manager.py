@@ -130,7 +130,7 @@ class RestManager:
     
     async def get_latest_closed_candle(self, symbol: str) -> Optional[List]:
         """
-        최근 완성된 캔들 1개 조회
+        최근 완성된 캔들 1개 조회 - 수정 버전
         
         Args:
             symbol: 심볼명
@@ -144,14 +144,28 @@ class RestManager:
         params = {
             'symbol': symbol,
             'interval': config.timeframe,
-            'limit': 2  # 현재 진행중 + 완성된 캔들
+            'limit': 3  # 여유있게 3개 가져옴
         }
         
         result = await self._request('GET', '/fapi/v1/klines', params)
         
         if result and len(result) >= 2:
-            # 두 번째가 완성된 캔들
-            return result[-2]
+            # 현재 시간 확인
+            import time
+            current_time_ms = int(time.time() * 1000)
+            
+            # 뒤에서부터 확인하여 완성된 캔들 찾기
+            for i in range(len(result) - 1, -1, -1):
+                candle = result[i]
+                close_time = candle[6]  # close_time index
+                
+                # close_time이 현재 시간보다 이전이면 완성된 캔들
+                if close_time < current_time_ms:
+                    return candle
+            
+            # 모든 캔들이 진행 중이면 두 번째 캔들 반환 (보통 완성됨)
+            if len(result) >= 2:
+                return result[-2]
         
         return None
     
@@ -227,3 +241,28 @@ class RestManager:
         """
         params = {'symbol': symbol}
         return await self._request('DELETE', '/fapi/v1/allOpenOrders', params, signed=True)
+
+    async def set_margin_mode(self, symbol: str, margin_type: str = 'ISOLATED') -> Optional[Dict]:
+        """
+        마진 모드 설정 (새로운 메서드)
+        
+        Args:
+            symbol: 심볼명
+            margin_type: 'ISOLATED' or 'CROSSED'
+            
+        Returns:
+            Optional[Dict]: 설정 결과
+        """
+        params = {
+            'symbol': symbol,
+            'marginType': margin_type
+        }
+        
+        # 마진 모드 변경은 실패해도 괜찮음 (이미 설정되어 있을 수 있음)
+        result = await self._request('POST', '/fapi/v1/marginType', params, signed=True)
+        
+        # 400 에러인 경우 이미 설정되어 있는 것
+        if result is None:
+            self.logger.debug(f"{symbol}: 마진 모드 이미 {margin_type}로 설정됨")
+        
+        return result    
