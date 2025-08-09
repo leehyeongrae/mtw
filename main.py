@@ -190,11 +190,11 @@ class TradingSystem:
 
     async def _periodic_status_print(self) -> None:
         """
-        30초마다 모든 심볼 상태 출력 (새로운 메서드)
+        60초마다 모든 심볼 상태 출력 (새로운 메서드)
         """
         while self.running:
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(60)
                 
                 for symbol in self.symbol_manager.active_symbols:
                     await self._print_enhanced_status(symbol)
@@ -344,8 +344,8 @@ class TradingSystem:
         """캔들 업데이트 이벤트 처리"""
         symbol = data['symbol']
         
-        # 30초마다 상태 출력 (요구사항)
-        if int(asyncio.get_event_loop().time()) % 30 == 0:
+        # 60초마다 상태 출력 (요구사항)
+        if int(asyncio.get_event_loop().time()) % 60 == 0:
             asyncio.create_task(self._print_status(symbol))
     
     async def _on_candle_closed(self, data: Dict) -> None:
@@ -532,7 +532,7 @@ class TradingSystem:
             self.logger.error(f"{symbol}: 리스크 액션 처리 실패 - {e}")
     
     async def _print_status(self, symbol: str) -> None:
-        """상태 출력 (30초 주기)"""
+        """상태 출력 (60초 주기)"""
         try:
             # 최근 캔들 가져오기
             recent_candles = self.candle_manager.get_latest_candles(symbol, 5)
