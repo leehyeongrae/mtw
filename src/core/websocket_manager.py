@@ -73,7 +73,7 @@ class WebSocketManager:
     
     async def _handle_message(self, message: str) -> None:
         """
-        웹소켓 메시지 처리
+        웹소켓 메시지 처리 - 실시간 신호 생성 추가
         
         Args:
             message: 수신된 메시지
@@ -100,8 +100,15 @@ class WebSocketManager:
                             'symbol': symbol,
                             'candle': candle
                         })
+                    else:
+                        # 실시간 업데이트 콜백 (진입/청산 신호 검사용)
+                        await self._trigger_callbacks('realtime_update', {
+                            'symbol': symbol,
+                            'candle': candle,
+                            'current_price': float(candle.get('c', 0))
+                        })
                     
-                    # 콜백 트리거
+                    # 기존 콜백 유지
                     await self._trigger_callbacks('candle_update', {
                         'symbol': symbol,
                         'candle': candle

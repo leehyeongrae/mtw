@@ -1,5 +1,5 @@
 """
-로깅 유틸리티 (KISS 원칙 적용)
+logger.py 수정 - 중복 로그 문제 해결
 """
 import logging
 import sys
@@ -24,10 +24,9 @@ def get_logger(name: str) -> logging.Logger:
     
     logger = logging.getLogger(name)
     
-    # 이미 핸들러가 설정되어 있으면 반환
+    # 이미 핸들러가 설정되어 있으면 제거 (중복 방지)
     if logger.handlers:
-        _loggers[name] = logger
-        return logger
+        logger.handlers.clear()
     
     # 로그 레벨 설정
     log_level = getattr(logging, config.log_level, logging.INFO)
@@ -45,6 +44,8 @@ def get_logger(name: str) -> logging.Logger:
     handler.setFormatter(formatter)
     
     logger.addHandler(handler)
+    
+    # 상위 로거로의 전파 방지 (중복 로그 방지)
     logger.propagate = False
     
     # 캐시에 저장

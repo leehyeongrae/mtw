@@ -43,7 +43,7 @@ class TradingSystem:
         self.hurst_cache: Dict[str, np.ndarray] = {}
         
     async def initialize(self) -> bool:
-        """시스템 초기화"""
+        """시스템 초기화 - 콜백 등록 수정"""
         try:
             self.logger.info("트레이딩 시스템 초기화 시작...")
             
@@ -78,12 +78,19 @@ class TradingSystem:
             # 포지션 업데이트
             await self.position_manager.update_positions()
             
-            # 웹소켓 콜백 등록
+            # 웹소켓 콜백 등록 (수정)
             self.websocket_manager.register_callback('candle_update', self._on_candle_update)
             self.websocket_manager.register_callback('candle_closed', self._on_candle_closed)
+            self.websocket_manager.register_callback('realtime_update', self._on_realtime_update)  # 추가
             
             # 텔레그램 봇 초기화
             await self.telegram_bot.initialize()
+            
+            # 텔레그램 시작 알림 추가
+            await self.telegram_bot.send_message("🚀 트레이딩 봇이 시작되었습니다!")
+            
+            # 주기적 상태 출력 태스크 시작
+            self.status_print_task = asyncio.create_task(self._periodic_status_print())
             
             self.logger.info("시스템 초기화 완료")
             return True
@@ -91,7 +98,225 @@ class TradingSystem:
         except Exception as e:
             self.logger.error(f"초기화 실패: {e}")
             return False
-    
+
+    async def _on_realtime_update(self, data: Dict) -> None:
+        """
+        실시간 업데이트 처리 (새로운 메서드)
+        웹소켓 데이터 수신시 즉시 신호 및 리스크 체크
+        """
+        symbol = data['symbol']
+        current_price = data['current_price']
+        
+        try:
+            # 쿨다운 체크
+            if await self.position_manager.is_in_cooldown(symbol):
+                return
+            
+            # 캔들 데이터 가져오기
+            df = await self.candle_manager.get_candles_for_analysis(symbol)
+            if df is None or len(df) < 100:
+                return
+            
+            # 지표 계산 (Hurst는 캐시 사용)
+            indicators = await self._calculate_indicators_realtime(symbol, df)
+            
+            # 현재 포지션 확인
+            current_position = self.position_manager.get_position_side(symbol)
+            
+            # 포지션이 있는 경우 - TP/SL 체크
+            if current_position:
+                # 리스크 체크 (TP/SL)
+                risk_action = await self.risk_manager.check_risk_limits(symbol, current_price)
+                if risk_action:
+                    await self._handle_risk_action(symbol, risk_action)
+                    return
+                
+                # 트레일링 스탑 업데이트
+                atr = indicators['atr'][-1] if len(indicators['atr']) > 0 else 0
+                if atr > 0:
+                    self.risk_manager.update_trailing_stop(symbol, current_price, current_position, atr)
+            
+            # 신호 생성 및 실행
+            signal_gen = self.signal_generators[symbol]
+            signal = signal_gen.generate_signal(indicators, current_position)
+            
+            if signal:
+                await self._execute_signal(symbol, signal, indicators)
+                
+        except Exception as e:
+            self.logger.error(f"{symbol}: 실시간 업데이트 처리 실패 - {e}")
+
+    async def _calculate_indicators_realtime(self, symbol: str, df: pd.DataFrame) -> Dict:
+        """
+        실시간 지표 계산 (새로운 메서드)
+        Hurst는 캐시 사용, 나머지는 실시간 계산
+        """
+        try:
+            # 지표 계산 (Hurst 제외)
+            indicators = Indicators.calculate_all(
+                df,
+                cci_length=config.cci_length,
+                cci_smoothing=config.cci_smoothing,
+                rsi_length=config.rsi_length,
+                supertrend_atr_length=config.supertrend_length,
+                supertrend_multiplier=config.supertrend_multiplier,
+                psar_start=config.psar_start,
+                psar_increment=config.psar_increment,
+                psar_maximum=config.psar_maximum,
+                vi_length=config.vi_length,
+                mfi_length=config.mfi_length,
+                atr_length=config.atr_length,
+                adx_length=config.adx_length,
+                adx_smoothing=config.adx_smoothing,
+                symbol=symbol,
+                exclude_hurst=True
+            )
+            
+            # 캐시된 Hurst 추가
+            if symbol in self.hurst_cache:
+                indicators['hurst_smoothed'] = self.hurst_cache[symbol]
+            else:
+                # Hurst가 없으면 기본값
+                indicators['hurst_smoothed'] = np.array([0.5] * len(df))
+            
+            # 지표 캐싱
+            self.indicators_cache[symbol] = indicators
+            
+            return indicators
+            
+        except Exception as e:
+            self.logger.error(f"{symbol}: 실시간 지표 계산 실패 - {e}")
+            return {}
+
+    async def _periodic_status_print(self) -> None:
+        """
+        30초마다 모든 심볼 상태 출력 (새로운 메서드)
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(30)
+                
+                for symbol in self.symbol_manager.active_symbols:
+                    await self._print_enhanced_status(symbol)
+                    
+            except Exception as e:
+                self.logger.error(f"주기적 상태 출력 오류: {e}")
+
+    async def _print_enhanced_status(self, symbol: str) -> None:
+        """
+        향상된 상태 출력 - 모든 지표 포함 (수정된 메서드)
+        """
+        try:
+            # 최근 캔들 가져오기
+            recent_candles = self.candle_manager.get_latest_candles(symbol, 5)
+            if recent_candles is None:
+                return
+            
+            # 현재 진행 캔들
+            current = self.candle_manager.current_candles.get(symbol, {})
+            
+            # 지표 가져오기
+            indicators = self.indicators_cache.get(symbol, {})
+            
+            if not indicators:
+                return
+            
+            # 추세장 판별
+            signal_gen = self.signal_generators[symbol]
+            is_trending = signal_gen.is_trending_market_by_slope(
+                indicators.get('adx', np.array([])),
+                indicators.get('hurst_smoothed', np.array([]))
+            )
+            
+            # ADX와 Hurst 기울기 계산
+            adx_slope = signal_gen.calculate_slope(
+                indicators.get('adx', np.array([])), 
+                config.trend_detection_candles
+            )
+            hurst_slope = signal_gen.calculate_slope(
+                indicators.get('hurst_smoothed', np.array([])), 
+                config.trend_detection_candles
+            )
+            
+            # 오실레이터 점수 계산
+            oscillator_score = signal_gen.calculate_score(
+                indicators.get('rsi', [50])[-1],
+                indicators.get('cci', [0])[-1],
+                indicators.get('mfi', [50])[-1]
+            )
+            
+            # 출력
+            print(f"\n{'='*70}")
+            print(f"[{symbol}] 상태 - {'추세장' if is_trending else '횡보장'}")
+            print(f"{'='*70}")
+            
+            # 과거 4개 캔들 (REST)
+            print("📊 과거 4개 캔들 (REST API):")
+            for i in range(-4, 0):
+                candle = recent_candles.iloc[i]
+                print(f"  #{i}: O:{candle['open']:.2f} H:{candle['high']:.2f} "
+                    f"L:{candle['low']:.2f} C:{candle['close']:.2f} V:{candle['volume']:.0f}")
+            
+            # 현재 캔들 (WebSocket)
+            if current:
+                print(f"\n🔴 현재 진행 캔들 (WebSocket):")
+                print(f"  O:{current.get('open', 0):.2f} H:{current.get('high', 0):.2f} "
+                    f"L:{current.get('low', 0):.2f} C:{current.get('close', 0):.2f} "
+                    f"V:{current.get('volume', 0):.0f}")
+            
+            # 계산된 지표들
+            print(f"\n📈 지표값:")
+            print(f"  ADX: {indicators.get('adx', [0])[-1]:.2f} (기울기: {adx_slope:.4f})")
+            print(f"  Hurst: {indicators.get('hurst_smoothed', [0])[-1]:.3f} (기울기: {hurst_slope:.4f})")
+            print(f"  RSI: {indicators.get('rsi', [0])[-1]:.1f}")
+            print(f"  CCI: {indicators.get('cci', [0])[-1]:.1f}")
+            print(f"  MFI: {indicators.get('mfi', [0])[-1]:.1f}")
+            print(f"  VI+: {indicators.get('vi_plus', [0])[-1]:.3f}")
+            print(f"  VI-: {indicators.get('vi_minus', [0])[-1]:.3f}")
+            print(f"  ATR: {indicators.get('atr', [0])[-1]:.4f}")
+            
+            # PSAR와 Supertrend
+            psar_trend = indicators.get('psar_trend', [0])[-1]
+            supertrend_trend = indicators.get('trend_direction', [0])[-1]
+            print(f"  PSAR: {'상승↑' if psar_trend == 1 else '하락↓'}")
+            print(f"  Supertrend: {'상승↑' if supertrend_trend == 1 else '하락↓'}")
+            
+            # 오실레이터 정규화 점수
+            print(f"\n💯 오실레이터 정규화 점수: {oscillator_score:.2f}")
+            if oscillator_score <= config.oscillator_long_threshold:
+                print(f"    → 과매도 신호 (롱 진입 가능)")
+            elif oscillator_score >= config.oscillator_short_threshold:
+                print(f"    → 과매수 신호 (숏 진입 가능)")
+            else:
+                print(f"    → 중립")
+            
+            # 추세장 판단 결과
+            print(f"\n🎯 추세장 판단:")
+            print(f"  ADX 기울기 > 0: {'✅' if adx_slope > 0 else '❌'}")
+            print(f"  Hurst 기울기 > 0: {'✅' if hurst_slope > 0 else '❌'}")
+            print(f"  → 결과: {'추세장' if is_trending else '횡보장'}")
+            
+            # 포지션 정보
+            position = self.position_manager.get_position(symbol)
+            if position:
+                print(f"\n💼 포지션:")
+                print(f"  방향: {'롱' if position['side'] == 'long' else '숏'}")
+                print(f"  진입가: {position['entry_price']:.4f}")
+                print(f"  현재가: {position['mark_price']:.4f}")
+                print(f"  미실현 PnL: ${position['unrealized_pnl']:.2f}")
+                
+                # 리스크 정보
+                risk_info = self.risk_manager.get_risk_info(symbol)
+                if risk_info['stop_loss']:
+                    print(f"  SL: {risk_info['stop_loss']:.4f}")
+                if risk_info['take_profit']:
+                    print(f"  TP: {risk_info['take_profit']:.4f}")
+            
+            print(f"{'='*70}\n")
+            
+        except Exception as e:
+            self.logger.error(f"상태 출력 오류: {e}")
+
     async def _calculate_hurst(self, symbol: str) -> None:
         """Hurst 지수 계산 및 캐싱"""
         try:
@@ -370,7 +595,7 @@ class TradingSystem:
             self.logger.error(f"상태 출력 오류: {e}")
     
     async def run(self) -> None:
-        """메인 실행 루프"""
+        """메인 실행 루프 - 수정"""
         self.running = True
         
         try:
@@ -390,6 +615,8 @@ class TradingSystem:
             websocket_task.cancel()
             position_update_task.cancel()
             symbol_update_task.cancel()
+            if hasattr(self, 'status_print_task'):
+                self.status_print_task.cancel()
             
         except Exception as e:
             self.logger.error(f"실행 오류: {e}")
