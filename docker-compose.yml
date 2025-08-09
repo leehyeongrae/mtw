@@ -7,9 +7,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - TZ=UTC  # 시간대 설정
     volumes:
       - ./logs:/app/logs  # 로그 디렉토리 마운트 (선택사항)
       - ./data:/app/data  # 데이터 디렉토리 마운트 (선택사항)
+      - /etc/localtime:/etc/localtime:ro  # 호스트 시간 동기화
     networks:
       - trading-network
     logging:

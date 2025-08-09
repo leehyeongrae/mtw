@@ -20,12 +20,18 @@ class RestManager:
         self.session: Optional[aiohttp.ClientSession] = None
         self.last_request_time = 0
         self.request_lock = asyncio.Lock()
+        self.time_offset = 0  # 시간 오프셋 추가
         
     async def initialize(self) -> None:
-        """세션 초기화"""
+        """세션 초기화 및 시간 동기화"""
         if not self.session:
             self.session = aiohttp.ClientSession()
             self.logger.info("REST API 세션 초기화 완료")
+            
+            # 시간 동기화
+            offset = await self.sync_time()
+            if offset is not None:
+                self.time_offset = offset
     
     async def close(self) -> None:
         """세션 종료"""
@@ -62,15 +68,16 @@ class RestManager:
             self.last_request_time = time.time()
     
     async def _request(self, method: str, endpoint: str, params: Optional[Dict] = None, 
-                       signed: bool = False) -> Optional[Any]:
+                    signed: bool = False, retry_count: int = 0) -> Optional[Any]:
         """
-        API 요청 실행
+        API 요청 실행 - 시간 동기화 문제 해결
         
         Args:
             method: HTTP 메서드
             endpoint: API 엔드포인트
             params: 요청 파라미터
             signed: 서명 필요 여부
+            retry_count: 재시도 횟수
             
         Returns:
             Optional[Any]: 응답 데이터
@@ -88,7 +95,10 @@ class RestManager:
         
         # 서명 처리
         if signed:
+            # 타임스탬프 생성 (밀리초)
             params['timestamp'] = int(time.time() * 1000)
+            # recvWindow 추가 (10초로 설정 - 네트워크 지연 고려)
+            params['recvWindow'] = 10000
             params['signature'] = self._generate_signature(params)
         
         headers = {
@@ -101,6 +111,14 @@ class RestManager:
                     return await response.json()
                 else:
                     error_text = await response.text()
+                    
+                    # 타임스탬프 에러 처리
+                    if response.status == 400 and '-1021' in error_text and retry_count < 3:
+                        self.logger.warning(f"타임스탬프 에러 감지, 재시도 {retry_count + 1}/3")
+                        await asyncio.sleep(1)
+                        # 재귀 호출로 재시도
+                        return await self._request(method, endpoint, params, signed, retry_count + 1)
+                    
                     self.logger.error(f"API 오류 {response.status}: {error_text}")
                     return None
                     
@@ -266,3 +284,49 @@ class RestManager:
             self.logger.debug(f"{symbol}: 마진 모드 이미 {margin_type}로 설정됨")
         
         return result    
+    
+    async def get_server_time(self) -> Optional[int]:
+        """
+        Binance 서버 시간 조회
+        
+        Returns:
+            Optional[int]: 서버 시간 (밀리초)
+        """
+        result = await self._request('GET', '/fapi/v1/time')
+        if result:
+            return result.get('serverTime')
+        return None    
+
+    async def sync_time(self) -> Optional[int]:
+        """
+        시간 동기화 확인 및 오프셋 계산
+        
+        Returns:
+            Optional[int]: 시간 오프셋 (밀리초)
+        """
+        try:
+            import time
+            
+            # 로컬 시간
+            local_time = int(time.time() * 1000)
+            
+            # 서버 시간
+            server_time = await self.get_server_time()
+            if not server_time:
+                self.logger.error("서버 시간 조회 실패")
+                return None
+            
+            # 시간 차이 계산
+            time_offset = server_time - local_time
+            
+            self.logger.info(f"시간 동기화 - 로컬: {local_time}, 서버: {server_time}, 차이: {time_offset}ms")
+            
+            # 시간 차이가 5초 이상이면 경고
+            if abs(time_offset) > 5000:
+                self.logger.warning(f"시간 차이가 큽니다: {time_offset}ms. 시스템 시간을 확인하세요.")
+            
+            return time_offset
+            
+        except Exception as e:
+            self.logger.error(f"시간 동기화 실패: {e}")
+            return None

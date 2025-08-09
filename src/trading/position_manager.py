@@ -152,6 +152,8 @@ class PositionManager:
         Returns:
             bool: 성공 여부
         """
+        import time  # 누락된 import 추가
+        
         try:
             # 락을 사용하여 동시 진입 방지
             async with self.lock:
@@ -160,19 +162,26 @@ class PositionManager:
                     self.logger.warning(f"{symbol}: 이미 포지션 존재 (캐시)")
                     return False
                 
-                # 2. 쿨다운 체크
-                if await self.is_in_cooldown(symbol):
-                    self.logger.debug(f"{symbol}: 쿨다운 중")
-                    return False
+                # 2. 쿨다운 체크 (락 내부로 이동)
+                if symbol in self.cooldowns:
+                    cooldown_end = self.cooldowns[symbol]
+                    now = datetime.now()
+                    if now < cooldown_end:
+                        remaining = (cooldown_end - now).total_seconds()
+                        self.logger.debug(f"{symbol}: 쿨다운 중 (남은 시간: {remaining:.1f}초)")
+                        return False
+                    else:
+                        # 쿨다운 종료
+                        del self.cooldowns[symbol]
                 
-                # 3. REST API로 실제 포지션 재확인 (중요!)
+                # 3. REST API로 실제 포지션 재확인
                 current_positions = await self.rest_manager.get_positions()
                 if current_positions:
                     for pos in current_positions:
                         if pos.get('symbol') == symbol:
                             position_amt = float(pos.get('positionAmt', 0))
                             if position_amt != 0:
-                                self.logger.warning(f"{symbol}: REST API 확인 결과 이미 포지션 존재")
+                                self.logger.warning(f"{symbol}: REST API 확인 결과 이미 포지션 존재 (수량: {position_amt})")
                                 # 캐시 업데이트
                                 self.positions[symbol] = {
                                     'symbol': symbol,
@@ -204,20 +213,23 @@ class PositionManager:
                     self.logger.debug(f"{symbol}: 마진 모드 이미 ISOLATED로 설정됨")
                 
                 # 레버리지 설정
-                await self.rest_manager.set_leverage(symbol, config.leverage)
+                leverage_result = await self.rest_manager.set_leverage(symbol, config.leverage)
+                self.logger.debug(f"{symbol}: 레버리지 설정 결과: {leverage_result}")
                 
                 # 주문 실행
                 order_side = 'BUY' if side == 'long' else 'SELL'
+                self.logger.info(f"{symbol}: 주문 실행 - {order_side}, 수량: {quantity}")
+                
                 result = await self.rest_manager.place_order(symbol, order_side, quantity)
                 
                 if result:
-                    self.logger.info(f"{symbol}: {side} 포지션 오픈 성공 (수량: {quantity})")
+                    self.logger.info(f"{symbol}: {side} 포지션 오픈 성공 - 주문 ID: {result.get('orderId', 'N/A')}")
                     
                     # 쿨다운 설정
                     await self.set_cooldown(symbol)
                     
                     # 포지션 정보 즉시 업데이트
-                    await asyncio.sleep(1)  # 체결 대기
+                    await asyncio.sleep(2)  # 체결 대기 (1초->2초로 증가)
                     await self.update_positions()
                     
                     return True
@@ -225,7 +237,7 @@ class PositionManager:
                     # 실패시 캐시에서 제거
                     async with self.lock:
                         self.positions.pop(symbol, None)
-                    self.logger.error(f"{symbol}: 포지션 오픈 실패")
+                    self.logger.error(f"{symbol}: 포지션 오픈 실패 - 주문 결과: None")
                     return False
                     
             except Exception as e:
@@ -233,10 +245,14 @@ class PositionManager:
                 async with self.lock:
                     self.positions.pop(symbol, None)
                 self.logger.error(f"{symbol}: 포지션 오픈 중 오류 - {e}")
+                import traceback
+                self.logger.error(traceback.format_exc())
                 return False
                 
         except Exception as e:
             self.logger.error(f"{symbol}: 포지션 오픈 실패 - {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
     async def close_position(self, symbol: str, reason: str = "signal") -> bool:

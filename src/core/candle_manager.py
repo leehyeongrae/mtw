@@ -20,7 +20,7 @@ class CandleManager:
         
     async def initialize_candles(self, symbol: str, candle_data: List[List]) -> bool:
         """
-        캔들 데이터 초기화 - 수정 버전
+        캔들 데이터 초기화 - 개선 버전
         마지막 캔들이 현재 진행 중이면 제외
         
         Args:
@@ -32,6 +32,10 @@ class CandleManager:
         """
         try:
             async with self.lock:
+                if not candle_data:
+                    self.logger.error(f"{symbol}: 빈 캔들 데이터")
+                    return False
+                
                 # 데이터프레임 생성
                 df = pd.DataFrame(candle_data, columns=[
                     'open_time', 'open', 'high', 'low', 'close', 'volume',
@@ -48,27 +52,41 @@ class CandleManager:
                 
                 # 현재 시간 확인
                 import time
-                current_time = pd.to_datetime(time.time() * 1000, unit='ms')
+                current_time_ms = int(time.time() * 1000)
+                current_time = pd.to_datetime(current_time_ms, unit='ms')
                 
-                # 마지막 캔들이 현재 진행 중인지 확인
-                if len(df) > 0:
-                    last_candle_close_time = df.iloc[-1]['close_time']
-                    
-                    # 마지막 캔들의 close_time이 현재 시간보다 미래면 진행 중인 캔들
-                    if last_candle_close_time > current_time:
-                        # 진행 중인 마지막 캔들 제외
-                        df = df.iloc[:-1]
-                        self.logger.debug(f"{symbol}: 진행 중인 마지막 캔들 제외")
+                # 완성된 캔들만 필터링 (close_time이 현재 시간보다 이전)
+                completed_candles = []
+                for idx in range(len(df)):
+                    if df.iloc[idx]['close_time'] < current_time:
+                        completed_candles.append(idx)
+                
+                if completed_candles:
+                    df = df.iloc[completed_candles].reset_index(drop=True)
+                    self.logger.debug(f"{symbol}: 완성된 캔들 {len(df)}개 로드")
+                else:
+                    self.logger.warning(f"{symbol}: 완성된 캔들 없음")
                 
                 # 최근 N개만 유지
-                df = df.tail(config.candle_limit).reset_index(drop=True)
+                if len(df) > config.candle_limit:
+                    df = df.tail(config.candle_limit).reset_index(drop=True)
+                
+                # 저장
                 self.candles[symbol] = df
                 
-                self.logger.info(f"{symbol}: 캔들 데이터 초기화 완료 ({len(df)}개 완성된 캔들)")
+                self.logger.info(
+                    f"{symbol}: 캔들 초기화 완료 - "
+                    f"캔들 수: {len(df)}, "
+                    f"시작: {df.iloc[0]['open_time'].strftime('%Y-%m-%d %H:%M') if len(df) > 0 else 'N/A'}, "
+                    f"종료: {df.iloc[-1]['open_time'].strftime('%Y-%m-%d %H:%M') if len(df) > 0 else 'N/A'}"
+                )
+                
                 return True
                 
         except Exception as e:
             self.logger.error(f"{symbol}: 캔들 초기화 실패 - {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
     async def update_current_candle(self, symbol: str, candle_data: Dict) -> None:

@@ -73,7 +73,7 @@ class WebSocketManager:
     
     async def _handle_message(self, message: str) -> None:
         """
-        웹소켓 메시지 처리 - 실시간 신호 생성 추가
+        웹소켓 메시지 처리 - 캔들 종료 감지 개선
         
         Args:
             message: 수신된 메시지
@@ -93,25 +93,20 @@ class WebSocketManager:
                     # 캔들 매니저 업데이트
                     await self.candle_manager.update_current_candle(symbol, candle)
                     
-                    # 캔들 종료 확인
-                    if candle.get('x', False):
-                        self.logger.info(f"{symbol}: 캔들 종료 감지")
+                    # 캔들 종료 확인 - 중요!
+                    if candle.get('x', False):  # x = true면 캔들 종료
+                        self.logger.info(f"{symbol}: 📊 캔들 종료 감지 (WebSocket)")
+                        # 캔들 종료 콜백 트리거
                         await self._trigger_callbacks('candle_closed', {
                             'symbol': symbol,
                             'candle': candle
                         })
-                    else:
-                        # 실시간 업데이트 콜백 (진입/청산 신호 검사용)
-                        await self._trigger_callbacks('realtime_update', {
-                            'symbol': symbol,
-                            'candle': candle,
-                            'current_price': float(candle.get('c', 0))
-                        })
                     
-                    # 기존 콜백 유지
-                    await self._trigger_callbacks('candle_update', {
+                    # 실시간 업데이트 콜백 (매 틱마다)
+                    await self._trigger_callbacks('realtime_update', {
                         'symbol': symbol,
-                        'candle': candle
+                        'candle': candle,
+                        'current_price': float(candle.get('c', 0))
                     })
                     
         except Exception as e:

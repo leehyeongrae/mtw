@@ -357,62 +357,43 @@ class TradingSystem:
     
     async def _on_candle_closed(self, data: Dict) -> None:
         """
-        캔들 종료 이벤트 처리 - 완전 수정 버전
-        REST API로 최신 캔들들을 가져와서 업데이트
+        캔들 종료 이벤트 처리 - 완전 재작성 버전
+        매 15분마다 모든 심볼의 캔들 업데이트
         """
         symbol = data['symbol']
-        self.logger.info(f"{symbol}: 캔들 종료 처리 시작")
+        self.logger.info(f"{symbol}: 캔들 종료 감지, 전체 캔들 업데이트 시작")
         
         try:
-            # REST API로 최근 10개 캔들 가져오기 (여유있게)
-            await asyncio.sleep(config.rest_api_delay)  # 캔들 완전 종료 대기
+            # 1. 캔들 완전 종료 대기
+            await asyncio.sleep(config.rest_api_delay)
             
-            recent_candles = await self.rest_manager.get_klines(symbol, 10)
-            if not recent_candles or len(recent_candles) < 2:
-                self.logger.error(f"{symbol}: 최근 캔들 조회 실패")
+            # 2. 전체 캔들 데이터 새로 가져오기 (간단하고 확실한 방법)
+            all_candles = await self.rest_manager.get_klines(symbol, config.candle_limit)
+            if not all_candles:
+                self.logger.error(f"{symbol}: 캔들 데이터 조회 실패")
                 return
             
-            # 현재 시간
-            import time
-            current_time_ms = int(time.time() * 1000)
-            
-            # 완성된 캔들들만 필터링 (close_time이 현재 시간보다 이전)
-            completed_candles = []
-            for candle in recent_candles:
-                if candle[6] < current_time_ms:  # close_time이 현재보다 이전
-                    completed_candles.append(candle)
-            
-            if not completed_candles:
-                self.logger.warning(f"{symbol}: 완성된 캔들이 없음")
-                return
-            
-            # 가장 최근 완성된 캔들
-            latest_completed = completed_candles[-1]
-            
-            # 캔들 추가 시도
-            success = await self.candle_manager.add_completed_candle(symbol, latest_completed)
-            
+            # 3. 캔들 데이터 전체 교체 (초기화)
+            success = await self.candle_manager.initialize_candles(symbol, all_candles)
             if not success:
-                self.logger.warning(f"{symbol}: 캔들 추가 실패, 전체 새로고침")
-                # 전체 캔들 데이터 새로고침
-                all_candles = await self.rest_manager.get_klines(symbol, config.candle_limit)
-                if all_candles:
-                    await self.candle_manager.initialize_candles(symbol, all_candles)
+                self.logger.error(f"{symbol}: 캔들 초기화 실패")
+                return
             
-            # 디버그: 현재 캔들 상태 출력
+            # 4. 최신 캔들 정보 로깅
             latest_candles = self.candle_manager.get_latest_candles(symbol, 5)
             if latest_candles is not None and len(latest_candles) > 0:
                 last_candle = latest_candles.iloc[-1]
                 self.logger.info(
-                    f"{symbol}: 최신 REST 캔들 - "
-                    f"시간: {last_candle['open_time'].strftime('%Y-%m-%d %H:%M:%S')}, "
-                    f"종가: {last_candle['close']:.4f}"
+                    f"{symbol}: 캔들 업데이트 완료 - "
+                    f"최신: {last_candle['open_time'].strftime('%Y-%m-%d %H:%M:%S UTC')}, "
+                    f"종가: {last_candle['close']:.4f}, "
+                    f"전체 캔들 수: {len(latest_candles)}"
                 )
             
-            # Hurst 재계산
+            # 5. Hurst 재계산
             await self._calculate_hurst(symbol)
             
-            # 신호 생성
+            # 6. 신호 처리
             await self._process_signals(symbol)
             
         except Exception as e:
@@ -694,7 +675,7 @@ class TradingSystem:
             self.logger.error(f"상태 출력 오류: {e}")
     
     async def run(self) -> None:
-        """메인 실행 루프 - 수정"""
+        """메인 실행 루프 - 주기적 캔들 새로고침 태스크 추가"""
         self.running = True
         
         try:
@@ -705,6 +686,7 @@ class TradingSystem:
             # 주기적 업데이트 태스크
             position_update_task = asyncio.create_task(self._periodic_position_update())
             symbol_update_task = asyncio.create_task(self.symbol_manager.periodic_update())
+            candle_refresh_task = asyncio.create_task(self._periodic_candle_refresh())  # 새로 추가!
             
             # 메인 루프
             while self.running:
@@ -714,6 +696,7 @@ class TradingSystem:
             websocket_task.cancel()
             position_update_task.cancel()
             symbol_update_task.cancel()
+            candle_refresh_task.cancel()  # 새로 추가!
             if hasattr(self, 'status_print_task'):
                 self.status_print_task.cancel()
             
@@ -873,6 +856,40 @@ class TradingSystem:
             self.logger.error(f"{symbol}: 상태 조회 실패 - {e}")
             return None
 
+    async def _periodic_candle_refresh(self) -> None:
+        """
+        주기적 캔들 새로고침 - 5분마다 모든 심볼 캔들 업데이트
+        WebSocket candle_closed 이벤트와 별개로 동작하는 백업 메커니즘
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(300)  # 5분마다
+                
+                self.logger.info("주기적 캔들 새로고침 시작")
+                
+                for symbol in self.symbol_manager.active_symbols:
+                    try:
+                        # REST API로 최신 캔들 가져오기
+                        all_candles = await self.rest_manager.get_klines(symbol, config.candle_limit)
+                        if all_candles:
+                            # 캔들 데이터 전체 교체
+                            await self.candle_manager.initialize_candles(symbol, all_candles)
+                            
+                            # Hurst 재계산
+                            await self._calculate_hurst(symbol)
+                            
+                            self.logger.debug(f"{symbol}: 주기적 캔들 새로고침 완료")
+                        
+                        # API 레이트 리밋 고려
+                        await asyncio.sleep(1)
+                        
+                    except Exception as e:
+                        self.logger.error(f"{symbol}: 주기적 캔들 새로고침 실패 - {e}")
+                
+                self.logger.info("주기적 캔들 새로고침 완료")
+                
+            except Exception as e:
+                self.logger.error(f"주기적 캔들 새로고침 오류: {e}")
 
 async def main():
     """메인 함수"""
