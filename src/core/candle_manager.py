@@ -93,7 +93,8 @@ class CandleManager:
     
     async def add_completed_candle(self, symbol: str, candle_data: List) -> bool:
         """
-        완성된 캔들 추가 (REST API 데이터)
+        완성된 캔들 추가 (REST API 데이터) - 완전 수정 버전
+        중복 체크 및 시간 순서 보장
         
         Args:
             symbol: 심볼명
@@ -105,6 +106,7 @@ class CandleManager:
         try:
             async with self.lock:
                 if symbol not in self.candles:
+                    self.logger.error(f"{symbol}: 캔들 데이터가 초기화되지 않음")
                     return False
                 
                 # 새 캔들 데이터 생성
@@ -121,23 +123,56 @@ class CandleManager:
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     new_candle[col] = new_candle[col].astype(float)
                 
-                # 기존 데이터와 병합
+                # 기존 데이터프레임
+                existing_df = self.candles[symbol]
+                
+                # 새 캔들의 open_time
+                new_open_time = new_candle.iloc[0]['open_time']
+                
+                # 중복 체크: 이미 존재하는 캔들인지 확인
+                if len(existing_df) > 0:
+                    # 마지막 캔들의 open_time과 비교
+                    last_open_time = existing_df.iloc[-1]['open_time']
+                    
+                    # 이미 존재하는 캔들이면 무시
+                    if new_open_time <= last_open_time:
+                        self.logger.debug(f"{symbol}: 이미 존재하는 캔들 (open_time: {new_open_time})")
+                        return True
+                    
+                    # 시간 간격 체크 (15분 = 900초)
+                    time_diff = (new_open_time - last_open_time).total_seconds()
+                    expected_interval = 15 * 60  # 15분
+                    
+                    if abs(time_diff - expected_interval) > 60:  # 1분 이상 차이나면 경고
+                        self.logger.warning(
+                            f"{symbol}: 캔들 간격 이상 - "
+                            f"예상: {expected_interval}초, 실제: {time_diff}초"
+                        )
+                
+                # 새 캔들 추가
                 self.candles[symbol] = pd.concat([
-                    self.candles[symbol], new_candle
+                    existing_df, new_candle
                 ], ignore_index=True)
                 
-                # 최근 N개만 유지
-                self.candles[symbol] = self.candles[symbol].tail(config.candle_limit).reset_index(drop=True)
+                # 시간순 정렬 (혹시 모를 순서 문제 방지)
+                self.candles[symbol] = self.candles[symbol].sort_values('open_time').reset_index(drop=True)
                 
-                # 무결성 검증
-                if not await self.validate_candle_integrity(symbol):
-                    self.logger.warning(f"{symbol}: 캔들 무결성 검증 실패")
-                    return False
+                # 최근 N개만 유지
+                if len(self.candles[symbol]) > config.candle_limit:
+                    self.candles[symbol] = self.candles[symbol].tail(config.candle_limit).reset_index(drop=True)
+                
+                self.logger.info(
+                    f"{symbol}: 새 캔들 추가 완료 - "
+                    f"open_time: {new_open_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                    f"전체 캔들 수: {len(self.candles[symbol])}"
+                )
                 
                 return True
                 
         except Exception as e:
             self.logger.error(f"{symbol}: 캔들 추가 실패 - {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
     async def validate_candle_integrity(self, symbol: str) -> bool:

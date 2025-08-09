@@ -204,7 +204,7 @@ class TradingSystem:
 
     async def _print_enhanced_status(self, symbol: str) -> None:
         """
-        향상된 상태 출력 - 모든 지표 포함 (수정된 메서드)
+        향상된 상태 출력 - 시간 형식 개선 버전
         """
         try:
             # 최근 캔들 가져오기
@@ -254,17 +254,24 @@ class TradingSystem:
             print("📊 과거 4개 캔들 (REST API):")
             for i in range(-4, 0):
                 candle = recent_candles.iloc[i]
-                print(f"  #{i} time {candle['open_time']}: O:{candle['open']:.2f} H:{candle['high']:.2f} "
+                # 시간을 읽기 쉬운 형식으로 변환
+                time_str = candle['open_time'].strftime('%Y-%m-%d %H:%M:%S UTC')
+                print(f"  #{i} {time_str}: O:{candle['open']:.2f} H:{candle['high']:.2f} "
                     f"L:{candle['low']:.2f} C:{candle['close']:.2f} V:{candle['volume']:.0f}")
             
             # 현재 캔들 (WebSocket)
             if current:
-                print(f"\n🔴 현재 진행 캔들 (WebSocket) :{current.get('open_time','')}")
+                # Unix timestamp를 datetime으로 변환
+                import pandas as pd
+                current_time = pd.to_datetime(current.get('open_time', 0), unit='ms')
+                time_str = current_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+                
+                print(f"\n🔴 현재 진행 캔들 (WebSocket) - {time_str}:")
                 print(f"  O:{current.get('open', 0):.2f} H:{current.get('high', 0):.2f} "
                     f"L:{current.get('low', 0):.2f} C:{current.get('close', 0):.2f} "
                     f"V:{current.get('volume', 0):.0f}")
             
-            # 계산된 지표들
+            # 계산된 지표들 (이하 동일)
             print(f"\n📈 지표값:")
             print(f"  ADX: {indicators.get('adx', [0])[-1]:.2f} (기울기: {adx_slope:.4f})")
             print(f"  Hurst: {indicators.get('hurst_smoothed', [0])[-1]:.3f} (기울기: {hurst_slope:.4f})")
@@ -349,32 +356,69 @@ class TradingSystem:
             asyncio.create_task(self._print_status(symbol))
     
     async def _on_candle_closed(self, data: Dict) -> None:
-        """캔들 종료 이벤트 처리"""
+        """
+        캔들 종료 이벤트 처리 - 완전 수정 버전
+        REST API로 최신 캔들들을 가져와서 업데이트
+        """
         symbol = data['symbol']
         self.logger.info(f"{symbol}: 캔들 종료 처리 시작")
         
         try:
-            # REST API로 완성된 캔들 가져오기
-            closed_candle = await self.rest_manager.get_latest_closed_candle(symbol)
-            if closed_candle:
-                # 캔들 추가
-                success = await self.candle_manager.add_completed_candle(symbol, closed_candle)
-                
-                # 무결성 검증 실패시 전체 새로고침
-                if not success or await self.candle_manager.needs_full_refresh(symbol):
-                    self.logger.warning(f"{symbol}: 전체 캔들 새로고침 시작")
-                    candles = await self.rest_manager.get_klines(symbol, config.candle_limit)
-                    if candles:
-                        await self.candle_manager.initialize_candles(symbol, candles)
-                
-                # Hurst 재계산
-                await self._calculate_hurst(symbol)
-                
-                # 신호 생성
-                await self._process_signals(symbol)
-                
+            # REST API로 최근 10개 캔들 가져오기 (여유있게)
+            await asyncio.sleep(config.rest_api_delay)  # 캔들 완전 종료 대기
+            
+            recent_candles = await self.rest_manager.get_klines(symbol, 10)
+            if not recent_candles or len(recent_candles) < 2:
+                self.logger.error(f"{symbol}: 최근 캔들 조회 실패")
+                return
+            
+            # 현재 시간
+            import time
+            current_time_ms = int(time.time() * 1000)
+            
+            # 완성된 캔들들만 필터링 (close_time이 현재 시간보다 이전)
+            completed_candles = []
+            for candle in recent_candles:
+                if candle[6] < current_time_ms:  # close_time이 현재보다 이전
+                    completed_candles.append(candle)
+            
+            if not completed_candles:
+                self.logger.warning(f"{symbol}: 완성된 캔들이 없음")
+                return
+            
+            # 가장 최근 완성된 캔들
+            latest_completed = completed_candles[-1]
+            
+            # 캔들 추가 시도
+            success = await self.candle_manager.add_completed_candle(symbol, latest_completed)
+            
+            if not success:
+                self.logger.warning(f"{symbol}: 캔들 추가 실패, 전체 새로고침")
+                # 전체 캔들 데이터 새로고침
+                all_candles = await self.rest_manager.get_klines(symbol, config.candle_limit)
+                if all_candles:
+                    await self.candle_manager.initialize_candles(symbol, all_candles)
+            
+            # 디버그: 현재 캔들 상태 출력
+            latest_candles = self.candle_manager.get_latest_candles(symbol, 5)
+            if latest_candles is not None and len(latest_candles) > 0:
+                last_candle = latest_candles.iloc[-1]
+                self.logger.info(
+                    f"{symbol}: 최신 REST 캔들 - "
+                    f"시간: {last_candle['open_time'].strftime('%Y-%m-%d %H:%M:%S')}, "
+                    f"종가: {last_candle['close']:.4f}"
+                )
+            
+            # Hurst 재계산
+            await self._calculate_hurst(symbol)
+            
+            # 신호 생성
+            await self._process_signals(symbol)
+            
         except Exception as e:
             self.logger.error(f"{symbol}: 캔들 종료 처리 실패 - {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
     
     async def _process_signals(self, symbol: str) -> None:
         """신호 처리"""
@@ -443,15 +487,27 @@ class TradingSystem:
     
     async def _execute_signal(self, symbol: str, signal: Dict, indicators: Dict) -> None:
         """
-        신호 실행 - 수정 버전 (포지션 크기 계산 개선)
+        신호 실행 - 중복 방지 강화 버전
         """
         try:
             action = signal['action']
             
             # 진입 신호
             if 'entry' in action:
-                # 포지션 중복 체크
+                # 1. 캐시 확인
                 if self.position_manager.has_position(symbol):
+                    self.logger.debug(f"{symbol}: 이미 포지션 존재 (캐시) - 신호 무시")
+                    return
+                
+                # 2. REST API로 실시간 포지션 확인 (중요!)
+                await self.position_manager.update_positions()
+                if self.position_manager.has_position(symbol):
+                    self.logger.debug(f"{symbol}: 이미 포지션 존재 (REST) - 신호 무시")
+                    return
+                
+                # 3. 쿨다운 체크
+                if await self.position_manager.is_in_cooldown(symbol):
+                    self.logger.debug(f"{symbol}: 쿨다운 중 - 신호 무시")
                     return
                 
                 # 계정 잔고 확인
@@ -479,7 +535,7 @@ class TradingSystem:
                 
                 current_price = float(df.iloc[-1]['close'])
                 
-                # 포지션 크기 계산 (현재 가격 포함)
+                # 포지션 크기 계산
                 quantity = self.position_manager.calculate_position_size(symbol, usdt_balance, current_price)
                 
                 # 심볼 정보에서 정밀도 적용
@@ -506,6 +562,7 @@ class TradingSystem:
                     f"수량: {quantity}"
                 )
                 
+                # open_position이 중복 체크를 포함하도록 수정됨
                 success = await self.position_manager.open_position(symbol, side, quantity)
                 
                 if success:
@@ -524,7 +581,7 @@ class TradingSystem:
                         'balance': usdt_balance
                     })
                 else:
-                    self.logger.error(f"{symbol}: 포지션 오픈 실패")
+                    self.logger.debug(f"{symbol}: 포지션 오픈 실패 또는 중복")
             
             # 청산 신호
             elif 'exit' in action:

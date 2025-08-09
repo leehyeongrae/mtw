@@ -142,7 +142,7 @@ class PositionManager:
     
     async def open_position(self, symbol: str, side: str, quantity: float) -> bool:
         """
-        포지션 오픈
+        포지션 오픈 - 중복 방지 강화 버전
         
         Args:
             symbol: 심볼명
@@ -153,37 +153,88 @@ class PositionManager:
             bool: 성공 여부
         """
         try:
-            # 포지션 중복 체크
-            if self.has_position(symbol):
-                self.logger.warning(f"{symbol}: 이미 포지션 존재")
+            # 락을 사용하여 동시 진입 방지
+            async with self.lock:
+                # 1. 메모리 캐시 확인
+                if self.has_position(symbol):
+                    self.logger.warning(f"{symbol}: 이미 포지션 존재 (캐시)")
+                    return False
+                
+                # 2. 쿨다운 체크
+                if await self.is_in_cooldown(symbol):
+                    self.logger.debug(f"{symbol}: 쿨다운 중")
+                    return False
+                
+                # 3. REST API로 실제 포지션 재확인 (중요!)
+                current_positions = await self.rest_manager.get_positions()
+                if current_positions:
+                    for pos in current_positions:
+                        if pos.get('symbol') == symbol:
+                            position_amt = float(pos.get('positionAmt', 0))
+                            if position_amt != 0:
+                                self.logger.warning(f"{symbol}: REST API 확인 결과 이미 포지션 존재")
+                                # 캐시 업데이트
+                                self.positions[symbol] = {
+                                    'symbol': symbol,
+                                    'position_amt': position_amt,
+                                    'side': 'long' if position_amt > 0 else 'short',
+                                    'entry_price': float(pos.get('entryPrice', 0)),
+                                    'mark_price': float(pos.get('markPrice', 0)),
+                                    'unrealized_pnl': float(pos.get('unRealizedProfit', 0)),
+                                    'margin': float(pos.get('isolatedWallet', 0) or pos.get('positionInitialMargin', 0)),
+                                    'leverage': int(pos.get('leverage', 1))
+                                }
+                                return False
+                
+                # 4. 포지션이 없음을 확인했으므로 즉시 캐시에 등록 (임시)
+                self.positions[symbol] = {
+                    'symbol': symbol,
+                    'side': side,
+                    'status': 'pending',  # 진행 중 표시
+                    'timestamp': time.time()
+                }
+                
+                self.logger.info(f"{symbol}: 포지션 오픈 시작 - {side}")
+            
+            # 락 밖에서 실제 주문 실행
+            try:
+                # 마진 모드 설정 (ISOLATED)
+                margin_mode_result = await self.rest_manager.set_margin_mode(symbol, 'ISOLATED')
+                if margin_mode_result is None:
+                    self.logger.debug(f"{symbol}: 마진 모드 이미 ISOLATED로 설정됨")
+                
+                # 레버리지 설정
+                await self.rest_manager.set_leverage(symbol, config.leverage)
+                
+                # 주문 실행
+                order_side = 'BUY' if side == 'long' else 'SELL'
+                result = await self.rest_manager.place_order(symbol, order_side, quantity)
+                
+                if result:
+                    self.logger.info(f"{symbol}: {side} 포지션 오픈 성공 (수량: {quantity})")
+                    
+                    # 쿨다운 설정
+                    await self.set_cooldown(symbol)
+                    
+                    # 포지션 정보 즉시 업데이트
+                    await asyncio.sleep(1)  # 체결 대기
+                    await self.update_positions()
+                    
+                    return True
+                else:
+                    # 실패시 캐시에서 제거
+                    async with self.lock:
+                        self.positions.pop(symbol, None)
+                    self.logger.error(f"{symbol}: 포지션 오픈 실패")
+                    return False
+                    
+            except Exception as e:
+                # 오류시 캐시에서 제거
+                async with self.lock:
+                    self.positions.pop(symbol, None)
+                self.logger.error(f"{symbol}: 포지션 오픈 중 오류 - {e}")
                 return False
-            
-            # 쿨다운 체크
-            if await self.is_in_cooldown(symbol):
-                return False
-            
-            # 마진 모드 설정 (ISOLATED)
-            margin_mode_result = await self.rest_manager.set_margin_mode(symbol, 'ISOLATED')
-            if margin_mode_result is None:
-                # 이미 설정되어 있을 수 있음 (400 에러이지만 정상)
-                self.logger.debug(f"{symbol}: 마진 모드 이미 ISOLATED로 설정됨")
-            
-            # 레버리지 설정
-            await self.rest_manager.set_leverage(symbol, config.leverage)
-            
-            # 주문 실행
-            order_side = 'BUY' if side == 'long' else 'SELL'
-            result = await self.rest_manager.place_order(symbol, order_side, quantity)
-            
-            if result:
-                self.logger.info(f"{symbol}: {side} 포지션 오픈 성공 (수량: {quantity})")
-                await self.set_cooldown(symbol)  # 기본 쿨다운 설정
-                return True
-            else:
-                self.logger.error(f"{symbol}: 포지션 오픈 실패")
-            
-            return False
-            
+                
         except Exception as e:
             self.logger.error(f"{symbol}: 포지션 오픈 실패 - {e}")
             return False
